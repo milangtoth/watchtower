@@ -27,11 +27,14 @@ For local development, export the key and model in your shell and run `cargo run
 
 | Environment variable | Purpose |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI credentials for learning, verification, and repair |
-| `WATCHTOWER_MODEL` | OpenAI model ID with Structured Outputs support |
+| `OPENAI_API_KEY` | OpenAI credentials for deciding, learning, verification, and repair. Required for attachment. |
+| `WATCHTOWER_MODEL` | OpenAI model ID with Structured Outputs support, such as `gpt-5.4`. Required for attachment. |
 | `WATCHTOWER_DATA_DIR` | SQLite database and document blobs. Defaults to `./data` locally and `/data` in Docker. |
 | `WATCHTOWER_READ_INTERVAL` | Seconds between scheduled reads. Defaults to `900`. |
 | `RUST_LOG` | Service log filter. Defaults to `info`. |
+| `ELEVENLABS_API_KEY` | Optional. Enables the voice tender assistant. |
+| `ELEVENLABS_AGENT_ID` | Optional. The ElevenAgents agent the voice assistant connects to. |
+| `WATCHTOWER_DASHBOARD_ASSETS` | Optional. Directory holding `elevenlabs-sdk.js`. Docker bundles it; defaults to `src/dashboard`. |
 
 ## Tender assistant
 
@@ -122,6 +125,21 @@ A full example is in `tests/fixtures/connection_decision.json`.
 
 ## How it works
 
+Watchtower turns a portal URL into a verified tender feed in eight steps. The model is used to decide, learn, check, and repair. Regular reads do not use the model.
+
+| Step | What happens | Model |
+|---|---|---|
+| 1. **Attach** | `POST /portals` returns the portal ID at once and queues a background read. The portal is `integrating`. | — |
+| 2. **Probe** | Cheap requests through the portal's rate-limited client find candidate connection methods: HTML listing, public JSON, OCDS API, RSS/Atom feed, sitemap, or TED. Each candidate records its entry URL, HTTP status, sample items, fields seen, and pagination. | — |
+| 3. **Rank** | A small logistic-regression scorer with weights trained offline and embedded in Rust scores each candidate from 0 to 1. | — |
+| 4. **Decide** | One model call picks a candidate and writes a rationale. The decision and the ranked alternatives are stored in SQLite and shown on the dashboard and by `GET /portals/{id}/connection`. | 1 call |
+| 5. **Learn** | The model proposes a declarative recipe for the chosen method from bounded page or JSON samples. OCDS uses a fixed preset instead. Rust validates the recipe before running it. | a few calls |
+| 6. **Read** | The recipe runner reads every listing page, the detail pages, and the documents. It streams files to disk and records evidence that pagination completed. | — |
+| 7. **Check** | Pagination, field quality, documents, and source evidence are checked. First reads, suspicious reads, and repairs also get model verification. A verified read is published atomically, and the portal is `serving`. | 1 call when needed |
+| 8. **Repair** | When a read breaks, the portal is `healing` and keeps serving its last verified tenders and files. The model gets the old recipe and the failure evidence. After two failed repair attempts on one method (one for OCDS), Watchtower re-decides with the next alternative (attempt 2). After two methods, the portal is `failed`, and the reason names the methods tried. A login or CAPTCHA also ends in `failed`. | per attempt |
+
+Status: probing, ranking, and the decide call are placeholders on `main` while David's probe and qwas's ranker and decision land. Today every portal gets one HTML candidate and the top-ranked candidate is chosen without a model call (`model: "none (top-ranked)"`). Readers for feeds, sitemaps, and OCDS, the stored decisions, and the fallback on repair are in place.
+
 The Axum API places work in SQLite. The Tokio worker runs one operation per portal at a time. OpenAI uses bounded samples to propose a declarative recipe, which Rust validates before running it against HTML or public JSON. The same fetcher handles exploration, listing, detail, and document requests and spaces requests at least one second apart per portal. Downloads are streamed to disk and ZIP entries are unpacked and hashed.
 
 A completed candidate is checked before publication. First reads, suspicious reads, and repairs use model verification. Healthy repeat reads use the saved recipe with no model calls. A repair runs against a new candidate while Watchtower serves the previous verified tenders and files. Successful repair replaces the recipe and snapshot in one transaction. The dashboard reads the same state and history as the API.
@@ -141,12 +159,20 @@ FROM model_usage
 GROUP BY portal_id, model, operation
 ```
 
-The live Luna demo attached and repaired a two-tender mock portal. Each row below includes the verification call for that operation. These are estimates from recorded usage at the standard token rates. [GPT-6 Luna pricing](https://developers.openai.com/api/docs/models/gpt-6-luna#pricing)
+### Cost per portal
 
-| Operation | Calls | Uncached input tokens | Cached input tokens | Output tokens | Est. USD |
+Measured with `gpt-5.4` (some calls with `gpt-5.4-mini`) on the local preview, 2026-11-20, from `model_usage`. Prices are OpenAI's standard rates per 1M tokens: gpt-5.4 $2.50 input, $0.25 cached input, $15 output; gpt-5.4-mini $0.75, $0.075, $4.50 ([pricing](https://developers.openai.com/api/docs/models/gpt-5.4)). Attach covers decide, learn, and verify. Repair is the total of all repair runs since registration, including their verification.
+
+| Portal | Decide | Learn | Verify | **Attach total** | Repair (runs to date) |
 |---|---:|---:|---:|---:|---:|
-| Attach and verify | 4 | 5,062 | 0 | 1,290 | $0.0011512 |
-| Repair and verify | 4 | 6,096 | 0 | 860 | $0.0010396 |
+| Mock portal, 2 tenders | $0 (no model call yet) | $0.0102 (2 calls) | $0.0069 (1) | **$0.017** | $0.018 (3 calls, 2 runs) |
+| Fixture portal, 8 tenders | $0 | $0.0250 (3) | $0.0244 (3) | **$0.049** | $0.096 (10 calls) |
+| TenderNed (failed: invalid selector) | $0 | $0.0568 (16) | — | **$0.057** | $0.381 (21 calls) |
+| Find a Tender (failed: HTTP 403) | $0 | $0.0793 (5) | — | **$0.079** | $0.022 (3 calls) |
+
+A complete run of the live repair demo on the mock portal (attach, then a layout change and repair) used 11 calls and cost $0.076: learn $0.012 (2 calls), verify $0.030 (4), repair $0.035 (5). On the first attach, verification rejected a description taken from the wrong paragraph. The first repair corrected it before publication.
+
+A successful attach of a simple portal costs about two to five cents. Failing real portals cost more because learning and repair retry up to their limits. TenderNed's repairs account for most of the spend. The decide step adds one call per attach and one per re-decision once qwas's model decision lands. These numbers will be replaced with qwas's evaluation across the test set.
 
 Healthy repeat reads use the stored recipe without a model call. The cost to learn or repair a real portal varies with the evidence sampled and the number of attempts.
 
@@ -156,7 +182,7 @@ Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, a
 
 Use `python3 scripts/check_contract.py --portal-id PORTAL_ID` for read-only checks against the running container. The `--exercise URL` mode also checks registration, refresh deduplication, and deletion using a fresh fixture URL.
 
-To reproduce the live repair, [start the switchable mock](mock_portal/README.md) and run `python3 scripts/demo_repair.py` against a fresh fixture registration. The [55-second dashboard demo](docs/watchtower-demo.mp4) replays actual API snapshots from the verified Luna run.
+To reproduce the live repair, [start the switchable mock](mock_portal/README.md) and run `python3 scripts/demo_repair.py` against a fresh fixture registration. The [55-second dashboard demo](docs/watchtower-demo.mp4) replays actual API snapshots from an earlier verified run. The [demo video script](docs/demo-video-script.md) covers the three-minute hand-in video.
 
 ## Tender Atlas
 
