@@ -24,7 +24,7 @@ use tower::ServiceExt;
 use watchtower::{
     api::{self, Api},
     db::Store,
-    domain::{CandidateRead, ReadFailure, Review},
+    domain::{CandidateRead, ConnectionDecision, ReadFailure, Review},
     fetch::Fetcher,
     model::{PortalModel, ReasoningContext},
     recipe::Recipe,
@@ -49,6 +49,7 @@ impl PortalModel for FakeModel {
         &self,
         _: &ReasoningContext<'_>,
         previous: Option<(&Recipe, &str)>,
+        _: &ConnectionDecision,
     ) -> Result<Recipe, ReadFailure> {
         self.learns.fetch_add(1, Ordering::SeqCst);
         let selector = if previous.is_some() {

@@ -1,8 +1,9 @@
 use crate::{
     db::{Job, OutageLimit, Store},
+    discovery,
     domain::{
-        CandidateRead, FieldChange, MovedFile, PublishedTender, ReadFailure, Review,
-        StoredEvidence, Tender, TenderStatus, TenderSummary,
+        CandidateRead, ConnectionDecision, FieldChange, MovedFile, PublishedTender, ReadFailure,
+        Review, StoredEvidence, Tender, TenderStatus, TenderSummary,
     },
     fetch::Fetcher,
     model::{PortalModel, ReasoningContext},
@@ -172,7 +173,10 @@ impl Worker {
 
         let recipe = match previous.as_ref() {
             Some(recipe) => Ok(recipe.clone()),
-            None => self.model.learn(&ctx, None).await,
+            None => match self.connect(&ctx).await? {
+                Ok(decision) => self.learn(&ctx, None, &decision).await,
+                Err(failure) => Err(failure),
+            },
         };
         let recipe = match recipe {
             Ok(recipe) => recipe,
@@ -301,6 +305,58 @@ impl Worker {
             .map_err(|error| (Stage::Verify, error))
     }
 
+    /// Chooses how to read a portal without a recipe: probe for candidate methods, rank them,
+    /// let the model decide, and store the decision as attempt 1. Earlier decisions for this
+    /// portal generation are replaced, because a new attach probes afresh.
+    async fn connect(
+        &self,
+        ctx: &ReasoningContext<'_>,
+    ) -> Result<Result<ConnectionDecision, ReadFailure>> {
+        let candidates = match discovery::probe(ctx.url, ctx.http).await {
+            Ok(candidates) if candidates.is_empty() => {
+                return Ok(Err(ReadFailure::Incomplete(
+                    "Probing found no usable way to read this portal".into(),
+                )));
+            }
+            Ok(candidates) => candidates,
+            Err(failure) => return Ok(Err(failure)),
+        };
+        let mut decision = match self.model.decide(ctx, discovery::rank(candidates)).await {
+            Ok(decision) => decision,
+            Err(failure) => return Ok(Err(failure)),
+        };
+        decision.attempt = 1;
+        self.store.clear_decisions(ctx.job).await?;
+        self.store.record_decision(ctx.job, &decision).await?;
+        tracing::info!(
+            portal_id = %ctx.job.portal_id,
+            method = decision.chosen.method.label(),
+            entry_url = %decision.chosen.entry_url,
+            rationale = %decision.rationale,
+            "Connection method chosen"
+        );
+        Ok(Ok(decision))
+    }
+
+    /// A recipe for the decided method. The OCDS preset maps fields directly and needs no model
+    /// call; every other method is learned by the model, starting from the chosen entry URL.
+    async fn learn(
+        &self,
+        ctx: &ReasoningContext<'_>,
+        previous: Option<(&Recipe, &str)>,
+        decision: &ConnectionDecision,
+    ) -> Result<Recipe, ReadFailure> {
+        if let Some(recipe) = Recipe::preset(&decision.chosen) {
+            return Ok(recipe);
+        }
+        let mut recipe = self.model.learn(ctx, previous, decision).await?;
+        // A recipe without a start URL would read the submitted address, not the chosen entry.
+        if recipe.start_url.is_none() && decision.chosen.entry_url != ctx.url.as_str() {
+            recipe.start_url = Some(decision.chosen.entry_url.clone());
+        }
+        Ok(recipe)
+    }
+
     async fn repair(
         &self,
         ctx: &ReasoningContext<'_>,
@@ -312,39 +368,52 @@ impl Worker {
         let Some(run_id) = self.store.begin_repair(job, &failure.to_string()).await? else {
             return Ok(());
         };
-        for _ in 0..2 {
-            let reason = failure.to_string();
-            match self.model.learn(ctx, Some((&recipe, &reason))).await {
-                Ok(repaired) => recipe = repaired,
-                Err(error @ ReadFailure::Blocked(_)) => {
+        // Portals attached before connection decisions existed get one now.
+        let mut decision = match self.store.latest_decision(&job.portal_id).await? {
+            Some(decision) => decision,
+            None => match self.connect(ctx).await? {
+                Ok(decision) => decision,
+                Err(error) if error.is_temporary() => {
+                    return self.defer(job, &run_id, &error).await;
+                }
+                Err(error) => {
                     return self
                         .store
                         .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
                         .await;
                 }
-                Err(error) => {
-                    failure = error;
-                    continue;
+            },
+        };
+        let mut tried = vec![decision.chosen.method];
+        loop {
+            let error = self
+                .repair_method(ctx, &run_id, &mut recipe, &mut failure, snapshot, &decision)
+                .await?;
+            match error {
+                RepairOutcome::Published => return Ok(()),
+                RepairOutcome::Blocked(error) => {
+                    return self
+                        .store
+                        .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
+                        .await;
                 }
+                RepairOutcome::Exhausted => {}
             }
-            let attempt = match recipe::read(ctx.http, ctx.url, &recipe).await {
-                Ok(candidate) => self.check(ctx, &recipe, candidate, snapshot, true).await,
-                Err(error) => Err((Stage::Read, error)),
-            };
-            let error = match attempt {
-                Ok(candidate) => return self.publish(job, &run_id, &recipe, candidate).await,
-                Err((stage, error)) => {
-                    log_failed_recipe(&job.portal_id, &run_id, &recipe, stage, &error);
-                    error
-                }
-            };
-            if let ReadFailure::Blocked(_) = error {
-                return self
-                    .store
-                    .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
-                    .await;
+            if failure.is_temporary()
+                || tried.len() >= MAX_METHODS
+                || decision.alternatives.is_empty()
+            {
+                break;
             }
-            failure = error;
+            decision = fallback(decision, &failure);
+            self.store.record_decision(job, &decision).await?;
+            tracing::warn!(
+                portal_id = %job.portal_id,
+                method = decision.chosen.method.label(),
+                attempt = decision.attempt,
+                "Repair falls back to the next connection method"
+            );
+            tried.push(decision.chosen.method);
         }
         if failure.is_temporary() {
             return self.defer(job, &run_id, &failure).await;
@@ -357,14 +426,62 @@ impl Worker {
         } else {
             self.recovery.recheck
         };
-        self.store
-            .fail(
-                job,
-                &run_id,
-                &format!("Repair did not restore delivery: {failure}"),
-                retry_in,
-            )
-            .await
+        let reason = if tried.len() > 1 {
+            let names: Vec<_> = tried.iter().map(|method| method.label()).collect();
+            format!("{} both failed: {failure}", names.join(" and "))
+        } else {
+            format!("Repair did not restore delivery: {failure}")
+        };
+        self.store.fail(job, &run_id, &reason, retry_in).await
+    }
+
+    /// Learns and checks recipes for one connection method: twice, or once for a preset that
+    /// would produce the same recipe again. Publishes on success.
+    async fn repair_method(
+        &self,
+        ctx: &ReasoningContext<'_>,
+        run_id: &str,
+        recipe: &mut Recipe,
+        failure: &mut ReadFailure,
+        snapshot: &Snapshot<'_>,
+        decision: &ConnectionDecision,
+    ) -> Result<RepairOutcome> {
+        let job = ctx.job;
+        let attempts = if Recipe::preset(&decision.chosen).is_some() {
+            1
+        } else {
+            2
+        };
+        for _ in 0..attempts {
+            let reason = failure.to_string();
+            match self.learn(ctx, Some((&*recipe, &reason)), decision).await {
+                Ok(repaired) => *recipe = repaired,
+                Err(error @ ReadFailure::Blocked(_)) => return Ok(RepairOutcome::Blocked(error)),
+                Err(error) => {
+                    *failure = error;
+                    continue;
+                }
+            }
+            let attempt = match recipe::read(ctx.http, ctx.url, recipe).await {
+                Ok(candidate) => self.check(ctx, recipe, candidate, snapshot, true).await,
+                Err(error) => Err((Stage::Read, error)),
+            };
+            let error = match attempt {
+                Ok(candidate) => {
+                    self.publish(job, run_id, recipe, candidate).await?;
+                    return Ok(RepairOutcome::Published);
+                }
+                Err((stage, error)) => {
+                    log_failed_recipe(&job.portal_id, run_id, recipe, stage, &error);
+                    error
+                }
+            };
+            if let ReadFailure::Blocked(_) = error {
+                return Ok(RepairOutcome::Blocked(error));
+            }
+            *failure = error;
+        }
+        Ok(RepairOutcome::Exhausted)
     }
 
     async fn publish(
@@ -383,6 +500,37 @@ impl Worker {
                 self.interval,
             )
             .await
+    }
+}
+
+/// Connection methods a repair tries before the portal is failed.
+const MAX_METHODS: usize = 2;
+
+enum RepairOutcome {
+    Published,
+    Blocked(ReadFailure),
+    /// Every attempt on this method failed; the failure holds the last reason.
+    Exhausted,
+}
+
+/// The next stored alternative as a new decision, without probing again.
+fn fallback(previous: ConnectionDecision, failure: &ReadFailure) -> ConnectionDecision {
+    let mut alternatives = previous.alternatives.into_iter();
+    let chosen = alternatives
+        .next()
+        .expect("fallback needs a stored alternative");
+    ConnectionDecision {
+        rationale: format!(
+            "{} failed during repair ({}). Trying the next ranked method, {}.",
+            previous.chosen.method.label(),
+            recipe::sample(&failure.to_string(), 300),
+            chosen.method.label()
+        ),
+        chosen,
+        alternatives: alternatives.collect(),
+        model: "none (fallback)".into(),
+        decided_at: chrono::Utc::now().to_rfc3339(),
+        attempt: previous.attempt + 1,
     }
 }
 

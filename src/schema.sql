@@ -37,3 +37,7 @@ CREATE TABLE IF NOT EXISTS portal_retry (
 CREATE TABLE IF NOT EXISTS preferences (
     name TEXT PRIMARY KEY, enabled INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS connection_decisions (
+    portal_id TEXT NOT NULL, generation INTEGER NOT NULL, attempt INTEGER NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (portal_id, generation, attempt)
+);

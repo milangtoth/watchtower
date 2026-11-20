@@ -21,10 +21,13 @@ pub struct ReasoningContext<'a> {
 
 #[async_trait]
 pub trait PortalModel: Send + Sync {
+    /// Proposes a recipe for the decided connection method. `previous` holds the old recipe and
+    /// failure during repair.
     async fn learn(
         &self,
         context: &ReasoningContext<'_>,
         previous: Option<(&Recipe, &str)>,
+        decision: &ConnectionDecision,
     ) -> Result<Recipe, ReadFailure>;
 
     async fn verify(
@@ -170,12 +173,23 @@ recipe to propose a recipe, or fail when there is no supported public interface.
 unused fields. Each sample includes a cleaned source excerpt and up to 40 observed links. Prefer links
 that help determine rows, pagination, details, and public documents. Reuse samples already provided.
 When callsRemainingAfterThis is 0, respond with recipe or fail and give a specific reason.
+connection is the method already chosen for this portal: its method, entryUrl (the first sample),
+how it was found, the fields seen and why it was chosen. Build the recipe for that method and set
+start_url to entryUrl when it differs from portalUrl: html uses listing "html", json uses listing
+"json", feed uses listing "feed", sitemap uses listing "sitemap". If samples show the method cannot
+deliver the open tenders, respond with fail and say why.
 recipeJson must contain a JSON object, not markdown. Only use fields actually shown.
 An access widget on a listing is not proof that documents are blocked. No logins or CAPTCHA solving.
 Allowed recipe fields:
 - start_url: optional URL relative to the submitted URL for the actual listing or public JSON endpoint.
-- listing: "html" or "json". items: a plain string holding the CSS selector for rows, or the JSON
-  pointer to the items array. Unlike the selections below, items is not an object.
+- listing: "html", "json", "feed" or "sitemap". items: a plain string holding the CSS selector for
+  rows, or the JSON pointer to the items array. Unlike the selections below, items is not an object.
+- feed (RSS or Atom) and sitemap listings need no items, next, total or list_fields: each feed entry
+  gives a title and link, Atom rel="next" links are followed, and every sitemap URL is a tender detail
+  page (sitemap indexes and .gz files are followed). url_pattern optionally keeps only entry URLs
+  matching it, where * matches any characters; use it to skip non-tender pages, especially in
+  sitemaps. Feed entries open their detail page only when detail_fields or document selectors are
+  set. Detail pages default to html.
 - next, total, empty: optional selections from the page root. next must yield the next URL.
   Use a real result total when shown and an explicit empty-result message when available.
 - detail_link: optional selection from each row yielding its detail URL; detail_format defaults to listing.
@@ -241,8 +255,9 @@ struct Discovery<'a> {
 }
 
 impl<'a> Discovery<'a> {
-    fn new(portal: &'a Url) -> Self {
-        let mut initial = portal.clone();
+    /// Starts sampling at `initial`, the chosen entry URL, while `portal` stays the submitted
+    /// address that recipe URLs are resolved against.
+    fn new(portal: &'a Url, mut initial: Url) -> Self {
         initial.set_fragment(None);
         Self {
             portal,
@@ -368,6 +383,7 @@ impl PortalModel for OpenAi {
         &self,
         ctx: &ReasoningContext<'_>,
         previous: Option<(&Recipe, &str)>,
+        decision: &ConnectionDecision,
     ) -> Result<Recipe, ReadFailure> {
         if self.config.is_none() {
             return Err(ReadFailure::Incomplete(
@@ -379,7 +395,11 @@ impl PortalModel for OpenAi {
         } else {
             ModelOperation::Learn
         };
-        let mut discovery = Discovery::new(ctx.url);
+        let entry = Url::parse(&decision.chosen.entry_url)
+            .ok()
+            .filter(public_http)
+            .unwrap_or_else(|| ctx.url.clone());
+        let mut discovery = Discovery::new(ctx.url, entry);
         for call in 1..=DISCOVERY_CALLS {
             if let Some(url) = discovery.next.take() {
                 match ctx
@@ -396,6 +416,9 @@ impl PortalModel for OpenAi {
                 "portalUrl": ctx.url.as_str(), "samples": discovery.pages,
                 "previousRecipe": previous.map(|(recipe, _)| recipe),
                 "failure": previous.map(|(_, reason)| reason), "feedback": discovery.feedback,
+                "connection": {"method": decision.chosen.method, "entryUrl": decision.chosen.entry_url,
+                    "foundVia": decision.chosen.found_via, "fieldsSeen": decision.chosen.fields_seen,
+                    "rationale": decision.rationale},
                 "callsRemainingAfterThis": remaining
             });
             let step: Step = self.response(ctx.job, op, LEARN_INSTRUCTIONS, &input, json!({
@@ -468,7 +491,7 @@ mod discovery_tests {
     #[test]
     fn tracks_requested_and_effective_urls_and_uses_observed_cross_origin_links() {
         let portal = Url::parse("https://example.org/portal#intro").unwrap();
-        let mut discovery = Discovery::new(&portal);
+        let mut discovery = Discovery::new(&portal, portal.clone());
         let requested = discovery.next.take().unwrap();
         let final_url = Url::parse("https://notices.example.org/portal/current").unwrap();
         discovery.record_page(requested, Page {
@@ -503,7 +526,7 @@ mod discovery_tests {
     #[test]
     fn rejected_recipe_remains_actionable_and_sixth_fetch_stops() {
         let portal = Url::parse("https://example.org/").unwrap();
-        let mut discovery = Discovery::new(&portal);
+        let mut discovery = Discovery::new(&portal, portal.clone());
         assert!(
             discovery
                 .apply_step(step("recipe", "", r#"{"listing":"html","items":"["}"#), 1)
