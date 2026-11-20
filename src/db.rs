@@ -152,9 +152,11 @@ impl Store {
     }
 
     pub async fn auto_refresh(&self) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM preferences WHERE name = 'auto_refresh' AND enabled = 1)")
-            .fetch_one(&self.0)
-            .await?)
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM preferences WHERE name = 'auto_refresh' AND enabled = 1)",
+        )
+        .fetch_one(&self.0)
+        .await?)
     }
 
     pub async fn set_auto_refresh(&self, enabled: bool) -> Result<()> {
