@@ -1394,8 +1394,86 @@ fn json_strings(value: &Value) -> Vec<&str> {
     strings
 }
 
+/// Words portals print where a value is missing. A missing value is published as missing.
+const NOT_STATED: &[&str] = &[
+    "-",
+    "–",
+    "—",
+    "n/a",
+    "n.v.t.",
+    "none",
+    "unknown",
+    "not stated",
+    "not specified",
+    "not known",
+    "niet vermeld",
+    "niet bekend",
+    "onbekend",
+    "nicht angegeben",
+    "keine angabe",
+    "unbekannt",
+    "non précisé",
+    "non renseigné",
+    "non communiqué",
+    "inconnu",
+    "no especificado",
+    "no consta",
+    "desconocido",
+    "non specificato",
+    "nie podano",
+    "brak",
+];
+
+fn stated(value: String) -> Option<String> {
+    let normalized = value.trim().trim_end_matches('.').to_lowercase();
+    (!NOT_STATED.contains(&normalized.as_str())).then_some(value)
+}
+
+/// Maps a procedure name in the portal's language to the appendix values. "Not open" forms are
+/// checked before "open", and Polish "nieograniczony" (unlimited) means open.
+fn procedure(value: &str) -> Procedure {
+    let value = value.to_lowercase();
+    let has = |terms: &[&str]| terms.iter().any(|term| value.contains(term));
+    if has(&["nieograniczony"]) {
+        Procedure::Open
+    } else if has(&[
+        "niet-openbaar",
+        "niet openbaar",
+        "nichtoffen",
+        "nicht offen",
+        "nicht-offen",
+        "restricted",
+        "restreint",
+        "restringido",
+        "ristretta",
+        "ograniczony",
+    ]) {
+        Procedure::Restricted
+    } else if has(&[
+        "negotiat",
+        "verhandlung",
+        "négoci",
+        "negoci",
+        "onderhandel",
+        "negoziat",
+        "negocjac",
+    ]) {
+        Procedure::Negotiated
+    } else if has(&["open", "offen", "ouvert", "abierto", "aperta"]) {
+        Procedure::Open
+    } else {
+        Procedure::Other
+    }
+}
+
 fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
-    let get = |key: &str| fields.get(key).and_then(|values| values.first()).cloned();
+    let get = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|values| values.first())
+            .cloned()
+            .and_then(stated)
+    };
     let status = get("status").unwrap_or_default().to_lowercase();
     let status = match status.as_str() {
         "withdrawn" | "cancelled" | "canceled" | "annulé" | "annulée" | "aufgehoben"
@@ -1455,14 +1533,7 @@ fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
         documents: Vec::new(),
         reference_number: get("referenceNumber"),
         description: get("description"),
-        procedure_type: get("procedureType").map(|value| match value.to_lowercase().as_str() {
-            "open" | "ouvert" | "offen" | "abierto" | "openbaar" => Procedure::Open,
-            "restricted" | "restreint" | "nichtoffen" | "restringido" => Procedure::Restricted,
-            "negotiated" | "négocié" | "verhandlungsverfahren" | "negociado" => {
-                Procedure::Negotiated
-            }
-            _ => Procedure::Other,
-        }),
+        procedure_type: get("procedureType").map(|value| procedure(&value)),
         contract_nature: get("contractNature").and_then(|value| {
             match value.to_lowercase().as_str() {
                 "works" | "travaux" | "bauleistungen" | "obras" | "werken" => Some(Nature::Works),
@@ -1658,5 +1729,33 @@ mod sample_tests {
         assert!(links.all.contains("https://portal.example/help"));
         assert!(links.all.contains("https://portal.example/tender/1"));
         assert!(!links.all.iter().any(|link| link.contains("elsewhere")));
+    }
+
+    #[test]
+    fn procedures_map_by_keyword_and_placeholders_count_as_missing() {
+        for (text, expected) in [
+            ("Openbaar", Procedure::Open),
+            ("Niet-openbaar", Procedure::Restricted),
+            ("Offenes Verfahren", Procedure::Open),
+            ("Nicht offenes Verfahren", Procedure::Restricted),
+            ("Verhandlungsverfahren", Procedure::Negotiated),
+            ("Procédure ouverte", Procedure::Open),
+            (
+                "Procédure concurrentielle avec négociation",
+                Procedure::Negotiated,
+            ),
+            ("Przetarg nieograniczony", Procedure::Open),
+            ("Przetarg ograniczony", Procedure::Restricted),
+            ("Dynamic purchasing system", Procedure::Other),
+        ] {
+            assert_eq!(procedure(text), expected, "{text}");
+        }
+        assert_eq!(stated("Niet vermeld".into()), None);
+        assert_eq!(stated(" Not specified. ".into()), None);
+        assert_eq!(stated("—".into()), None);
+        assert_eq!(
+            stated("Stichting Openbaar Onderwijs".into()).as_deref(),
+            Some("Stichting Openbaar Onderwijs")
+        );
     }
 }
