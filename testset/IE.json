@@ -1,0 +1,77 @@
+[
+  {
+    "id": "9531031",
+    "url": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9531031",
+    "title": "Supply, Storage and Delivery of High Five Boxing and Inclusive Activity Equipment Packs",
+    "buyerName": "Irish Athletic Boxing Association CLG trading as Boxing Ireland",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-04T17:00:00+00:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9543275&resourceId=9531031",
+      "fileName": "Boxing_Ireland_High_Five_Equipment_Tender_FINAL (2).pdf",
+      "sizeBytes": 157911,
+      "sha256": "6b21cee840c6295ec826a776853aabc8480ec6763b58016698d29d8c468d2ef3"
+    }
+  },
+  {
+    "id": "9540615",
+    "url": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9540615",
+    "title": "The Provision of Scenario scoping and development for climate adaptation planning in Ireland",
+    "buyerName": "Environmental Protection Agency",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-17T14:00:00+00:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9540775&resourceId=9540615",
+      "fileName": "Standard EPA Terms and Conditions for Services.pdf",
+      "sizeBytes": 269550,
+      "sha256": "3029642df553bf34cbe36d2ffc3e065e2165dfec360a080017ee205ab279f782"
+    }
+  },
+  {
+    "id": "9532980",
+    "url": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9532980",
+    "title": "Corporate Car Hire Services",
+    "buyerName": "Raidió Teilifís Éireann ( RTÉ )",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-21T13:00:00+00:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9534335&resourceId=9532980",
+      "fileName": "EUROPEAN SINGLE PROCUREMENT DOCUMENT.docx",
+      "sizeBytes": 56738,
+      "sha256": "3dddd4a706c7e6505294bc0081bfceedc528cab9faa8594de1fc950e1e172b75"
+    }
+  },
+  {
+    "id": "9527859",
+    "url": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9527859",
+    "title": "Request for tenders for the provision of an IT Service Management Platform for the Central Statistics Office",
+    "buyerName": "Central Statistics Office",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-21T12:00:00+00:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9528105&resourceId=9527859",
+      "fileName": "Appendix 1a Qualification Criteria.docx",
+      "sizeBytes": 38381,
+      "sha256": "d3fd3eb65f42057c4f7f9d759b804cdaaedc945f09e57b099284fbb0aca100f8"
+    }
+  },
+  {
+    "id": "9524108",
+    "url": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9524108",
+    "title": "Establishment of a Single-Party Framework Agreement for the Provision of Procurement Consultancy Services",
+    "buyerName": "Medical Council",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-18T12:00:00+00:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9524314&resourceId=9524108",
+      "fileName": "Appendix A Response Document.docx",
+      "sizeBytes": 95994,
+      "sha256": "916c36340efb568086b0608b98bd10c0731372f570219db602fa171758c2fe2e"
+    }
+  }
+]

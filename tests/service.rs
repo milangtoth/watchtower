@@ -404,6 +404,15 @@ async fn restart_records_interrupted_read_and_reschedules_active_portal() {
     drop(store);
     let reopened = Store::open(&db).await.unwrap();
     reopened.recover().await.unwrap();
+    assert!(
+        reopened.auto_refresh().await.unwrap(),
+        "scheduled reads start on"
+    );
+    reopened.set_auto_refresh(false).await.unwrap();
+    reopened.enqueue_due().await.unwrap();
+    assert!(reopened.claim().await.unwrap().is_none());
+    reopened.set_auto_refresh(true).await.unwrap();
+    assert!(reopened.auto_refresh().await.unwrap());
     reopened.enqueue_due().await.unwrap();
     let runs = reopened.runs(&portal).await.unwrap().unwrap();
     assert_eq!(runs[0].result.as_deref(), Some("failed"));

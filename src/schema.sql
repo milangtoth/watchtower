@@ -33,3 +33,7 @@ CREATE TABLE IF NOT EXISTS portal_retry (
     temporary_failures INTEGER NOT NULL DEFAULT 0, last_repair_at INTEGER, manual_run TEXT,
     PRIMARY KEY (portal_id, generation)
 );
+
+CREATE TABLE IF NOT EXISTS preferences (
+    name TEXT PRIMARY KEY, enabled INTEGER NOT NULL
+);

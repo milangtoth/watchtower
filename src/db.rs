@@ -42,6 +42,10 @@ pub struct OutageLimit {
     pub seconds: i64,
 }
 
+/// True unless the `auto_refresh` preference was stored as off. A missing row means on.
+const AUTO_REFRESH: &str =
+    "COALESCE((SELECT enabled FROM preferences WHERE name = 'auto_refresh'), 1) = 1";
+
 const PORTAL_COLUMNS: &str = "id, url, state, reason, tender_count, last_success_at";
 const INSERT_RUN: &str =
     "INSERT INTO runs(id, portal_id, generation, kind) VALUES(?, ?, ?, 'read')";
@@ -183,9 +187,25 @@ impl Store {
         Ok(())
     }
 
+    /// Whether scheduled reads run. On unless an operator turned it off: the service must
+    /// read, notice and repair portals without anyone enabling it first.
+    pub async fn auto_refresh(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar(&format!("SELECT {AUTO_REFRESH}"))
+            .fetch_one(&self.0)
+            .await?)
+    }
+
+    pub async fn set_auto_refresh(&self, enabled: bool) -> Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO preferences(name, enabled) VALUES('auto_refresh', ?)")
+            .bind(enabled)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
     pub async fn enqueue_due(&self) -> Result<()> {
         let mut tx = self.0.begin().await?;
-        let portals: Vec<(String, i64)> = sqlx::query_as("SELECT id, generation FROM portals p WHERE deleted = 0 AND next_read_at <= ? AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.portal_id = p.id AND r.generation = p.generation AND r.finished_at IS NULL)")
+        let portals: Vec<(String, i64)> = sqlx::query_as(&format!("SELECT id, generation FROM portals p WHERE {AUTO_REFRESH} AND deleted = 0 AND next_read_at <= ? AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.portal_id = p.id AND r.generation = p.generation AND r.finished_at IS NULL)"))
             .bind(Utc::now().timestamp()).fetch_all(&mut *tx).await?;
         for (id, generation) in portals {
             sqlx::query(INSERT_RUN)

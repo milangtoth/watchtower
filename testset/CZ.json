@@ -1,0 +1,72 @@
+[
+  {
+    "id": "8518",
+    "url": "https://zakazky.muni.cz/contract_display_8518.html",
+    "title": "Stolní nechlazená centrifuga",
+    "buyerName": "Masarykova univerzita",
+    "submissionDeadline": "2026-12-21T10:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://zakazky.muni.cz/document_156896/a47dd11b4b9413ef98cf62bdd8ee9980-01_faf_stolni_nechlazena_centrifuga_zd_podepsano-pdf",
+      "fileName": "01_FaF_Stolni_nechlazena_centrifuga_ZD_podepsano.pdf",
+      "sizeBytes": 359127,
+      "sha256": "d09f99340ba6d7d8cd16da509addea0699121a7e613ba889ac7f6a8524480fd1"
+    }
+  },
+  {
+    "id": "8516",
+    "url": "https://zakazky.muni.cz/contract_display_8516.html",
+    "title": "Invertovaný mikroskop pro kontrolu živých buněčných kultur",
+    "buyerName": "Masarykova univerzita",
+    "submissionDeadline": "2026-12-21T10:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://zakazky.muni.cz/document_156892/d358e0b977c27a4247fc6adccc99b743-01_faf_invertovany_mikroskop_ufto_zd_podepsano-pdf",
+      "fileName": "01_FaF_Invertovany_mikroskop_UFTo_ZD_podepsano.pdf",
+      "sizeBytes": 360546,
+      "sha256": "d85cdd3ffef0e7a6855dcdcd208224e56aaff3930925e662c4bfa92ed2ad19e0"
+    }
+  },
+  {
+    "id": "8423",
+    "url": "https://zakazky.muni.cz/contract_display_8423.html",
+    "title": "Váhy - část 3: Sušicí váhy",
+    "buyerName": "Masarykova univerzita",
+    "submissionDeadline": "2026-12-01T10:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://zakazky.muni.cz/document_156765/126d28e6b1f45e4f64b898f70c4dcbb2-01_faf_vahy_cast_3_susici_vahy_zd_podepsano-pdf",
+      "fileName": "01_FaF_Vahy_cast_3_Susici_vahy_ZD_podepsano.pdf",
+      "sizeBytes": 373339,
+      "sha256": "11fad1f0178fe852c4f458d9a80975fbfd8fa8f08b6ddc1637d6bdd93e89fb4d"
+    }
+  },
+  {
+    "id": "8422",
+    "url": "https://zakazky.muni.cz/contract_display_8422.html",
+    "title": "Váhy - část 2: Laboratorní váhy",
+    "buyerName": "Masarykova univerzita",
+    "submissionDeadline": "2026-12-01T10:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://zakazky.muni.cz/document_156761/9e0e113f69441d05cae17afbff31e951-01_faf_vahy_cast_2_laboratorni_vahy_zd_podepsano-pdf",
+      "fileName": "01_FaF_Vahy_cast_2_Laboratorni_vahy_ZD_podepsano.pdf",
+      "sizeBytes": 374365,
+      "sha256": "d37c142571315b504bea8b125bb54aa8c282549425d0e1f63ddab50923f0c479"
+    }
+  },
+  {
+    "id": "8421",
+    "url": "https://zakazky.muni.cz/contract_display_8421.html",
+    "title": "Váhy - část 1: Analytické váhy do GMP",
+    "buyerName": "Masarykova univerzita",
+    "submissionDeadline": "2026-12-01T10:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://zakazky.muni.cz/document_156754/d2708a7d68d70351bca45647e60f1fbd-01_faf_vahy_cast_1_analyticke_vahy_do_gmp_zd_podepsano-pdf",
+      "fileName": "01_FaF_Vahy_cast_1_Analyticke_vahy_do_GMP_ZD_podepsano.pdf",
+      "sizeBytes": 375096,
+      "sha256": "731c93fba2fa07e495b4f5006c9d13db27a0d136d156986d836478381992eb00"
+    }
+  }
+]

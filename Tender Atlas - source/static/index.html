@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#103530"><title>Tender Atlas · European public procurement</title>
+<link rel="icon" href="/icon.png"><link rel="stylesheet" href="/app.css"><script defer src="/app.js"></script><script defer src="/portals.js"></script><script defer src="/managed.js"></script>
+</head>
+<body>
+<header class="top"><div class="shell top-inner">
+<a class="brand" href="#explorer" aria-label="Tender Atlas home"><img src="/icon.png" alt="">Tender<span>Atlas</span></a>
+<nav aria-label="Main navigation"><button class="navtab active" data-view="explorer">Explorer</button><button class="navtab" data-view="portals">Portals</button><button class="navtab" data-view="sources">Data sources</button><button class="navtab" data-view="discover">Discover a portal</button></nav>
+<label title="Automatically recheck discovered and connected portals. Manual actions can still use credits."><input type="checkbox" id="auto-refresh" disabled> Auto-refresh portals</label>
+<button class="btn primary sync" data-act="collect"><i data-icon="sync"></i><span>Collect notices</span></button>
+</div></header>
+<main>
+<section class="hero" aria-labelledby="hero-title"><div class="shell hero-inner"><div class="map" aria-hidden="true"></div><div class="hero-copy">
+<h1 id="hero-title">Europe’s public contracts</h1>
+<p>Search tenders, awards and procurement notices across official registers.</p>
+<form class="search" id="search-form" role="search"><i data-icon="search"></i><input id="query" type="search" aria-label="Search notices" placeholder="Search by keyword, buyer or CPV code" autocomplete="off"><button type="submit">Search <i data-icon="arrow"></i></button></form>
+</div></div></section>
+<div class="metrics"><div class="shell metric-inner">
+<div class="metric"><span class="metric-icon"><i data-icon="layers"></i></span><div><span class="metric-value" id="m-total">—</span><span class="metric-label">Indexed notices</span></div></div>
+<div class="metric"><span class="metric-icon"><i data-icon="globe"></i></span><div><span class="metric-value" id="m-geo">—</span><span class="metric-label">Buyer countries</span></div></div>
+<div class="metric"><span class="metric-icon"><i data-icon="database"></i></span><div><span class="metric-value" id="m-sources">—</span><span class="metric-label">Official sources</span></div></div>
+<div class="metric"><span class="metric-icon"><i data-icon="calendar"></i></span><div><span class="metric-value date-stat" id="m-latest">—</span><span class="metric-label">Latest record date</span></div></div>
+</div></div>
+<section class="shell register" id="explorer" aria-labelledby="register-title">
+<div class="section-head"><div><h2 id="register-title">Notice register</h2><p id="result-info" aria-live="polite">Loading your index…</p></div>
+<div class="export-wrap"><button id="export-toggle" class="btn secondary" aria-expanded="false"><i data-icon="download"></i>Export <i data-icon="down"></i></button>
+<div class="menu" id="export-menu" hidden><a id="csv-link">CSV spreadsheet</a><a id="raw-link">JSON lines with source data</a></div></div></div>
+<div class="filters">
+<label><span class="sr">Country</span><i data-icon="globe"></i><select id="country"><option value="">All countries</option></select></label>
+<label><span class="sr">Notice type</span><i data-icon="tag"></i><select id="stage"><option value="">All notice types</option></select></label>
+<label><span class="sr">Source</span><i data-icon="database"></i><select id="source"><option value="">All sources</option></select></label>
+<button id="dates-toggle" class="btn filter" aria-expanded="false"><i data-icon="calendar"></i>Dates<i data-icon="down"></i></button>
+<button id="reset" class="link" hidden>Clear filters</button>
+<label class="sort"><i data-icon="sort"></i><span class="sr">Sort by</span><select id="sort"><option value="recent">Newest first</option><option value="old">Oldest first</option><option value="deadline">Deadline first</option></select></label>
+</div>
+<div id="date-filters" class="date-filters" hidden><label>Record date from<input id="from" type="date"></label><label>Through<input id="to" type="date"></label><label class="check"><input id="upcoming" type="checkbox">Tenders with upcoming deadlines</label></div>
+<div id="records" class="table-wrap"></div><div id="pagination" class="pages"></div>
+</section>
+<section class="shell register" id="sources" hidden><div class="section-head"><div><h2>Data sources</h2><p>Publisher coverage and dates in your local index. A procurement can have notices in several registers.</p></div></div><div id="source-grid"></div></section>
+<section class="shell register" id="portals" hidden><div class="section-head"><div><h2>Portal operations</h2><p>Delivery status, recent activity, and notices held for each portal.</p></div></div><form id="portal-add-form" class="portal-form"><label for="managed-address">Add a portal</label><div><input id="managed-address" type="url" placeholder="https://…" required><button class="btn primary">Connect</button></div></form><div id="managed-portals"></div></section><section class="shell register" id="discover" hidden>
+<div class="section-head"><div><h2>Discover a procurement portal</h2><p>Paste a public website, notice listing, feed, or XML sitemap to preview up to five notices. Atlas skips sites that present a CAPTCHA and waits at least one second between publisher requests.</p></div></div>
+<form id="portal-form" class="portal-form"><label for="portal-url">Portal address</label>
+<div><input id="portal-url" type="url" placeholder="https://…" required maxlength="2048"><button class="btn primary" id="portal-read">Preview notices</button></div></form>
+<div id="portal-saved"></div><p id="portal-status" role="status"></p><div id="portal-result"></div>
+<a href="/api/portal-examples" class="link" download>Export discovery training examples</a>
+</section>
+</main>
+<footer><div class="shell foot"><span><strong>Tender Atlas</strong> &nbsp; / &nbsp; European public procurement</span><button class="link" id="quit">Quit app</button></div></footer>
+<dialog id="drawer"><div class="dialog-head"><div class="kicker" id="dlg-kicker"></div><button class="icon-btn" id="close" aria-label="Close"><i data-icon="close"></i></button></div><div id="dialog-body"></div></dialog>
+<div id="toast" role="status" hidden></div>
+</body></html>

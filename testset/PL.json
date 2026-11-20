@@ -1,0 +1,72 @@
+[
+  {
+    "id": "1412693",
+    "url": "https://platformazakupowa.pl/transakcja/1412693",
+    "title": "TZ.383.92.2026 (TP) TZ.383.92.2026 Dostawa wymazówek i ez bakteriologicznych do pobierania materiałów do badań mikrobiologicznych (Zadanie Nr 1), akcesoriów i testów do diagnostyki parazytologicznej (Zadanie Nr 2) oraz odczynników chemicznych do badań parazytologicznych (Zadanie Nr 3).",
+    "buyerName": "Wojewódzki Szpital Zespolony im. L. Rydygiera w Toruniu",
+    "submissionDeadline": "2026-11-27T09:30:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://platformazakupowa.pl/file/get_new/5d9fd72e6fc691324bc60082d7d15730.pdf",
+      "fileName": "SWZ TZ.383.92.2026.pdf",
+      "sizeBytes": 828890,
+      "sha256": "f8928c947ef0de126a11e6c9be8fed54fb92a8db04b3f0083b33a45a527ee1ec"
+    }
+  },
+  {
+    "id": "1397720",
+    "url": "https://platformazakupowa.pl/transakcja/1397720",
+    "title": "TZ.383.85.2026 (PN) TZ.383.85.2026 Dostawa wyrobów medycznych jednorazowego użytku z podziałem na 13 zadań.",
+    "buyerName": "Wojewódzki Szpital Zespolony im. L. Rydygiera w Toruniu",
+    "submissionDeadline": "2026-11-30T09:30:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://platformazakupowa.pl/file/get_new/5a39e037af48d93d1a5991aa21282e3a.pdf",
+      "fileName": "SWZ TZ.383.85.2026.pdf",
+      "sizeBytes": 893103,
+      "sha256": "12cb8a57c3f8ac3f164c265e41edbd35cfadb64b85cfa1269edb66c1474e0fb7"
+    }
+  },
+  {
+    "id": "1402568",
+    "url": "https://platformazakupowa.pl/transakcja/1402568",
+    "title": "TZ.383.88.2026 (TZ.383.88.2026) Dostawa materiałów opatrunkowych z podziałem na 21 zadań.",
+    "buyerName": "Wojewódzki Szpital Zespolony im. L. Rydygiera w Toruniu",
+    "submissionDeadline": "2026-12-08T08:30:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://platformazakupowa.pl/file/get_new/785f7116e3357f2f6275b41822e37ad7.doc",
+      "fileName": "SWZ Nr TZ.383.88.2026.doc",
+      "sizeBytes": 812544,
+      "sha256": "a1a1c7edddb4e450e0589424a98820047e12f3a2c51878827e5a30863a5a2f56"
+    }
+  },
+  {
+    "id": "1409632",
+    "url": "https://platformazakupowa.pl/transakcja/1409632",
+    "title": "TZ.383.91.2026 (PN) TZ.383.91.2026 Dostawa odczynników, materiałów zużywalnych i eksploatacyjnych, różnych materiałów laboratoryjnych oraz dzierżawa aparatury diagnostycznej – 4 zadania.",
+    "buyerName": "Wojewódzki Szpital Zespolony im. L. Rydygiera w Toruniu",
+    "submissionDeadline": "2026-12-21T09:30:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://platformazakupowa.pl/file/get_new/063f575c8e634559df49872534e9a811.pdf",
+      "fileName": "SWZ TZ.383.91.2026.pdf",
+      "sizeBytes": 1116619,
+      "sha256": "613f824f8f942f9f8c2a008b733dc910d050f98d394d081fa56a2d426d9c8662"
+    }
+  },
+  {
+    "id": "1411456",
+    "url": "https://platformazakupowa.pl/transakcja/1411456",
+    "title": "TZ.383.89.2026 (PN) TZ.383.89.2026 Dostawa wyrobów medycznych jednorazowego użytku do anestezjologii i intensywnej terapii z podziałem na 9 zadań.",
+    "buyerName": "Wojewódzki Szpital Zespolony im. L. Rydygiera w Toruniu",
+    "submissionDeadline": "2026-12-23T08:30:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://platformazakupowa.pl/file/get_new/fc9ef5906f32b752ddedfca674c1437b.doc",
+      "fileName": "SWZ Nr TZ.383.89.2026.doc",
+      "sizeBytes": 825856,
+      "sha256": "055c744a7bcd772e62e4e1605ccff9d83d16f86cafc2fd4012eaedf986e81072"
+    }
+  }
+]
