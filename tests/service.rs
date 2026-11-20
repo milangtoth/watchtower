@@ -24,11 +24,11 @@ use tower::ServiceExt;
 use watchtower::{
     api::{self, Api},
     db::Store,
-    domain::{CandidateRead, ReadFailure},
+    domain::{CandidateRead, ReadFailure, Review},
     fetch::Fetcher,
     model::{PortalModel, ReasoningContext},
     recipe::Recipe,
-    worker::{Jobs, Worker},
+    worker::{Jobs, Recovery, Worker},
 };
 
 const DOCUMENT: &[u8] = b"%PDF-1.4\nFixture procurement document\n%%EOF\n";
@@ -75,7 +75,7 @@ impl PortalModel for FakeModel {
         _: &ReasoningContext<'_>,
         _: &Recipe,
         candidate: &CandidateRead,
-        _: i64,
+        _: &Review,
     ) -> Result<(), ReadFailure> {
         self.verifies.fetch_add(1, Ordering::SeqCst);
         assert!(candidate.evidence.terminal_page);
@@ -223,6 +223,7 @@ async fn portal_lifecycle_preserves_verified_data_and_serves_document_bytes() {
             fetcher: Fetcher::new(files.as_ref().clone()).unwrap(),
             model: model.clone(),
             interval: 900,
+            recovery: Recovery::default(),
         }
         .run(stop.clone()),
     );
@@ -445,7 +446,8 @@ async fn fallback_pages_skip_external_tools_but_recipe_dead_ends_still_fail() {
     let tool_server = tokio::spawn(async move { axum::serve(tool_listener, tool).await });
 
     let attachment_list = format!(
-        r#"<main><section class="attachment"><a href="/files/terms.pdf">Standard terms</a></section>
+        r#"<main><section class="attachment"><a href="/files/terms.pdf">Supervisor terms</a></section>
+        <section class="attachment"><a href="/files/unrelated.pdf">Finance annex</a></section>
         <section class="attachment"><a href="{tool_url}">Police Station Register</a></section>
         <a href="/guidance/other">Other guidance</a></main>"#
     );

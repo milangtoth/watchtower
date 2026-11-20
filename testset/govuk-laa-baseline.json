@@ -1,0 +1,71 @@
+{
+  "portal": "https://www.gov.uk/government/collections/tenders-for-legal-aid-contracts",
+  "verified_on": "2026-11-20",
+  "method": "Read-only fetch of the collection and its seven Current tenders pages, one request per 1.2 s. Identifiers are each page's govuk:content-id meta tag. Deadlines are only those the page states with a date and time.",
+  "listing_section": "Current tenders",
+  "tenders": [
+    {
+      "url": "https://www.gov.uk/government/publications/2026-criminal-defence-direct-cdd",
+      "content_id": "5fc3b84e-e409-45fc-b792-6977fbd3a3fe",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2025-07-16",
+      "deadline": "2025-08-28T17:00:00+01:00",
+      "expected_status": "closed",
+      "source_text": "Tender submission deadline: 28 August 2025 (17:00)"
+    },
+    {
+      "url": "https://www.gov.uk/government/publications/2027-peer-reviewer-contract-procurement-process",
+      "content_id": "c13b68df-f526-43ee-9d07-3a39a00b18c3",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2026-05-21",
+      "deadline": null,
+      "expected_status": "open",
+      "source_text": "A 16 June 2026 update states a cut-off of 17:00 on 26th June 2026 for 1 March 2027 commencement. A 12 August 2026 amendment says the deadline changed and points to Application Guide v3 (PDF). Tenders are assessed annually. No current deadline is stated on the page."
+    },
+    {
+      "url": "https://www.gov.uk/government/publications/crime-contract-2025-tender",
+      "content_id": "aae01847-af59-4b16-9073-51ebcc1b71de",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2024-05-07",
+      "deadline": null,
+      "expected_status": "open",
+      "source_text": "Stage 3 will close on, or around, 30 September 2034. No time is given and the date is hedged."
+    },
+    {
+      "url": "https://www.gov.uk/government/publications/housing-loss-prevention-advice-services-2025",
+      "content_id": "519170ec-c7fe-4557-ac1c-7ed29db279a5",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2025-02-21",
+      "deadline": "2025-03-25T17:00:00+00:00",
+      "expected_status": "closed",
+      "source_text": "The deadline for submitting tenders for this procurement process is 17:00 on 25 March 2025. Later updates invite expressions of interest by email, the latest by 5pm on 13 November 2026."
+    },
+    {
+      "url": "https://www.gov.uk/government/publications/re-opening-2024-standard-civil-contract-procurement-process",
+      "content_id": "799f91e4-8872-41e3-818d-12be39d82391",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2024-11-25",
+      "deadline": "2025-12-31T11:59:00+00:00",
+      "expected_status": "closed",
+      "source_text": "Tenders must be submitted using the LAA's eTendering system and must be submitted by 11:59 on 31 December 2025."
+    },
+    {
+      "url": "https://www.gov.uk/government/publications/specialist-telephone-advice-from-september-2025",
+      "content_id": "07f84a9f-b21b-4036-b9aa-3618ded65f43",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2024-12-06",
+      "deadline": "2025-03-10T17:00:00+00:00",
+      "expected_status": "closed",
+      "source_text": "The deadline for submitting a tender through this procurement process is 17:00 on 10 March 2025."
+    },
+    {
+      "url": "https://www.gov.uk/guidance/introduction-of-inquest-category-of-law",
+      "content_id": "9aab487f-51f4-41ea-8161-b552ab9aaaad",
+      "buyer": "Legal Aid Agency",
+      "publication_date": "2026-07-28",
+      "deadline": "2027-03-31T17:00:00+01:00",
+      "expected_status": "open",
+      "source_text": "The deadline for submitting a tender through this procurement process is 17:00 on 31st March 2027"
+    }
+  ]
+}

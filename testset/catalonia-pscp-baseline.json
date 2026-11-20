@@ -1,0 +1,61 @@
+{
+  "portal": "https://contractaciopublica.cat/portal-api/ultimes-publicacions?page=0&size=100&tipus=104",
+  "verified_on": "2026-11-20",
+  "documents": [
+    {
+      "listing_item": "https://contractaciopublica.cat/ca/detall-publicacio/300946122",
+      "title": "Serveis de disseny, muntatge, desmuntatge, manteniment i supervisió dels estands que conformen els Pavellons de Catalunya a les fires Seafood Expo Global, Salon Gourmets i Summer Fancy Food Show.",
+      "buyer": "Promotora d'Exportacions Catalanes, SA",
+      "deadline": "2026-12-21T12:00:00.000Z",
+      "detail_json": "https://contractaciopublica.cat/portal-api/detall-publicacio-expedient/f6d9a319-b4b4-4855-af06-19ad0cf75a3c/300946122",
+      "document": "https://contractaciopublica.cat/portal-api/descarrega-document/302824441/672E532028BB0B9EE1FFE33E3F18EEC4",
+      "filename": "PCAP 05_2027.pdf",
+      "sha256": "814da94c6cc7f000cec79365d4c36f37a5e4c0e14221fc29d932e83a6c99edf9",
+      "size": 991893
+    },
+    {
+      "listing_item": "https://contractaciopublica.cat/ca/detall-publicacio/300941943",
+      "title": "Contracte de subministrament d'un equip d'esterilització a vapor",
+      "buyer": "Fundació Hospital Clínic Veterinari MP",
+      "deadline": "2026-12-04T13:00:00.000Z",
+      "detail_json": "https://contractaciopublica.cat/portal-api/detall-publicacio-expedient/d45e6bd8-9c88-4ae3-8f38-bf23745172f3/300941943",
+      "document": "https://contractaciopublica.cat/portal-api/descarrega-document/302824279/B27D581482F3D4943A25BBFA3B6121A1",
+      "filename": "Exp. 3-2026_Plec de clàusules administratives.pdf",
+      "sha256": "11ea05b6dfcb0f2931ed92e35d46c31a6976af6be0f507eae23c94715f353014",
+      "size": 551487
+    },
+    {
+      "listing_item": "https://contractaciopublica.cat/ca/detall-publicacio/300946111",
+      "title": "SERVEI D' ANÀLISIS DE LABORATORI PER AL PROJECTE RESTARC",
+      "buyer": "Consorci Centre de Recerca Ecològica i Aplicacions Forestals (CREAF)",
+      "deadline": "2026-12-04T22:59:00.000Z",
+      "detail_json": "https://contractaciopublica.cat/portal-api/detall-publicacio-expedient/3ea6736f-0279-4181-82c8-e4858838ea66/300946111",
+      "document": "https://contractaciopublica.cat/portal-api/descarrega-document/302824447/D195F8855E211F20FC841A35342B029B",
+      "filename": "PCAP.pdf",
+      "sha256": "1056c47c536139879fdd8c97a08cc2460d855d6786f8dfd0ed1f0700c7fc89c5",
+      "size": 397577
+    },
+    {
+      "listing_item": "https://contractaciopublica.cat/ca/detall-publicacio/300945970",
+      "title": "Servei d’edició, impressió i distribució de la revista municipal",
+      "buyer": "Ajuntament de Santa Coloma de Cervelló",
+      "deadline": "2026-12-10T13:00:00.000Z",
+      "detail_json": "https://contractaciopublica.cat/portal-api/detall-publicacio-expedient/499dca50-ad72-46cf-ae24-3cb2900189be/300945970",
+      "document": "https://contractaciopublica.cat/portal-api/descarrega-document/302824195/0F2C13C0ADF3BFA59EB6AAD00E1E29B0",
+      "filename": "Plec de clàusules administratives particulars.pdf",
+      "sha256": "3e67bdb1aadcb50a211d9efa489092b1f24c602fe710ec2a9fcc2071873ff0eb",
+      "size": 555655
+    },
+    {
+      "listing_item": "https://contractaciopublica.cat/ca/detall-publicacio/300945623",
+      "title": "42/2026-OSA - Servei de recollida i gestió (tractament) dels residus procedents de la deixalleria municipal de Calafell, gestionada per CEMSSA",
+      "buyer": "CALAFELL EMPRESA MUNICIPAL DE SERVEIS, SA",
+      "deadline": "2026-12-04T22:59:59.000Z",
+      "detail_json": "https://contractaciopublica.cat/portal-api/detall-publicacio-expedient/e51eaf4e-ae4b-466a-bf14-0880056dd569/300945623",
+      "document": "https://contractaciopublica.cat/portal-api/descarrega-document/302823148/AA7ABE3EACCF11AC5D7EBF108E551630",
+      "filename": "PCAP 42-2026-OSA_.pdf",
+      "sha256": "3eb70e42b220952a62d2457f5defb6d975c3f9a4aae45ae4467c90ef6943c1df",
+      "size": 871649
+    }
+  ]
+}

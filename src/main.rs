@@ -6,7 +6,7 @@ use watchtower::{
     db::Store,
     fetch::Fetcher,
     model::OpenAi,
-    worker::{Jobs, Worker},
+    worker::{Jobs, Recovery, Worker},
 };
 
 #[tokio::main]
@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         interval,
         fetcher: Fetcher::new(files.clone())?,
         model: Arc::new(OpenAi::new(store.clone())?),
+        recovery: Recovery::default(),
     };
     let handle = tokio::spawn(worker.run(stop.clone()));
     let app = api::router(Api {

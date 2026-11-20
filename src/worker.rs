@@ -1,13 +1,21 @@
 use crate::{
-    db::{Job, Store},
-    domain::{CandidateRead, ReadFailure, TenderStatus},
+    db::{Job, OutageLimit, Store},
+    domain::{
+        CandidateRead, FieldChange, MovedFile, PublishedTender, ReadFailure, Review,
+        StoredEvidence, Tender, TenderStatus, TenderSummary,
+    },
     fetch::Fetcher,
     model::{PortalModel, ReasoningContext},
     recipe::{self, Recipe},
 };
 use anyhow::{Context, Result};
 use reqwest::Url;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, Notify},
     task::JoinSet,
@@ -42,7 +50,42 @@ pub struct Worker {
     pub jobs: Jobs,
     pub fetcher: Fetcher,
     pub model: Arc<dyn PortalModel>,
+    /// Seconds between regular reads of a portal.
     pub interval: i64,
+    pub recovery: Recovery,
+}
+
+/// How a portal recovers from failures without a person. All durations are in seconds.
+#[derive(Clone, Debug)]
+pub struct Recovery {
+    /// Waits after the first, second and third consecutive temporary failure. Later retries
+    /// wait the regular interval.
+    pub backoff: [i64; 3],
+    /// The longest `Retry-After` honored.
+    pub retry_after_cap: i64,
+    /// Consecutive temporary failures that make a portal failed.
+    pub outage_failures: i64,
+    /// Time without a successful read that makes a portal failed during temporary failures.
+    pub outage_seconds: i64,
+    /// Least time between two paid repairs that ran out of attempts. A manual refresh may
+    /// repair sooner.
+    pub repair_cooldown: i64,
+    /// Wait before reading a portal that blocked delivery with a login or CAPTCHA, or whose
+    /// attach failed, again.
+    pub recheck: i64,
+}
+
+impl Default for Recovery {
+    fn default() -> Self {
+        Self {
+            backoff: [60, 300, 900],
+            retry_after_cap: 3600,
+            outage_failures: 3,
+            outage_seconds: 3600,
+            repair_cooldown: 6 * 3600,
+            recheck: 6 * 3600,
+        }
+    }
 }
 
 impl Worker {
@@ -87,7 +130,7 @@ impl Worker {
                         result = worker.execute(&job) => {
                             if let Err(error) = result {
                                 tracing::error!(%error, portal_id = %job.portal_id, "Portal worker failed");
-                                if let Err(error) = worker.store.fail_job(&job, "Internal error while reading the portal").await {
+                                if let Err(error) = worker.store.fail_job(&job, "Internal error while reading the portal", worker.interval).await {
                                     tracing::error!(%error, "Could not record worker failure");
                                 }
                             }
@@ -121,10 +164,11 @@ impl Worker {
             .tenders(&job.portal_id, None)
             .await?
             .unwrap_or_default();
-        let prior_open = baseline
-            .iter()
-            .filter(|tender| tender.tender.status == TenderStatus::Open)
-            .count() as i64;
+        let prior = self.store.evidence(job).await?;
+        let snapshot = Snapshot {
+            tenders: &baseline,
+            evidence: prior.as_ref(),
+        };
 
         let recipe = match previous.as_ref() {
             Some(recipe) => Ok(recipe.clone()),
@@ -132,7 +176,16 @@ impl Worker {
         };
         let recipe = match recipe {
             Ok(recipe) => recipe,
-            Err(failure) => return self.store.fail(job, &job.id, &failure.to_string()).await,
+            Err(failure) if failure.is_temporary() => {
+                return self.defer(job, &job.id, &failure).await;
+            }
+            // Learning again costs model calls, so a failed attach waits for the recheck.
+            Err(failure) => {
+                return self
+                    .store
+                    .fail(job, &job.id, &failure.to_string(), self.recovery.recheck)
+                    .await;
+            }
         };
         let mut read = recipe::read(&http, &url, &recipe).await;
         if let Err(failure @ ReadFailure::Temporary(_)) = &read {
@@ -140,51 +193,112 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs(2)).await;
             read = recipe::read(&http, &url, &recipe).await;
         }
-        let stage = if read.is_ok() {
-            Stage::Verify
-        } else {
-            Stage::Read
-        };
         let result = match read {
             Ok(candidate) => {
-                let suspicious = baseline
-                    .iter()
-                    .filter(|previous| previous.tender.status == TenderStatus::Open)
-                    .any(|previous| {
-                        let old = &previous.tender;
-                        candidate
-                            .tenders
-                            .iter()
-                            .find(|new| new.key() == old.key())
-                            .is_none_or(|new| {
-                                new.documents.len() < old.documents.len()
-                                    || (old.title.is_some() && new.title.is_none())
-                                    || (old.buyer_name.is_some() && new.buyer_name.is_none())
-                                    || (old.submission_deadline.is_some()
-                                        && new.submission_deadline.is_none())
-                            })
-                    });
-                if previous.is_none() || suspicious {
-                    self.model
-                        .verify(&ctx, &recipe, &candidate, prior_open)
-                        .await
-                        .map(|()| candidate)
-                } else {
-                    Ok(candidate)
-                }
+                self.check(&ctx, &recipe, candidate, &snapshot, previous.is_none())
+                    .await
             }
-            Err(failure) => Err(failure),
+            Err(failure) => Err((Stage::Read, failure)),
         };
-        if let Err(failure) = &result {
-            log_failed_recipe(&job.portal_id, &job.id, &recipe, stage, failure);
-        }
+        let result = result.map_err(|(stage, failure)| {
+            log_failed_recipe(&job.portal_id, &job.id, &recipe, stage, &failure);
+            failure
+        });
         match result {
             Ok(candidate) => self.publish(job, &job.id, &recipe, candidate).await,
-            Err(failure @ (ReadFailure::Blocked(_) | ReadFailure::Temporary(_))) => {
-                self.store.fail(job, &job.id, &failure.to_string()).await
+            Err(failure) if failure.is_temporary() => self.defer(job, &job.id, &failure).await,
+            Err(failure @ ReadFailure::Blocked(_)) => {
+                self.store
+                    .fail(job, &job.id, &failure.to_string(), self.recovery.recheck)
+                    .await
             }
-            Err(failure) => self.repair(&ctx, recipe, failure, prior_open).await,
+            Err(failure) => {
+                if let Some(until) = self.repair_cooldown(job).await? {
+                    let at = chrono::DateTime::from_timestamp(until, 0)
+                        .map(|time| time.to_rfc3339())
+                        .unwrap_or_default();
+                    return self
+                        .store
+                        .fail(
+                            job,
+                            &job.id,
+                            &format!(
+                                "Read still fails: {failure}. The last repair did not restore delivery; the next repair starts after {at}"
+                            ),
+                            self.interval,
+                        )
+                        .await;
+                }
+                self.repair(&ctx, recipe, failure, &snapshot).await
+            }
         }
+    }
+
+    /// When a repair ran out of attempts within the cooldown, returns the time the cooldown
+    /// ends. A manual refresh skips the cooldown.
+    async fn repair_cooldown(&self, job: &Job) -> Result<Option<i64>> {
+        let retry = self.store.retry_state(job).await?;
+        if retry.manual_run.as_deref() == Some(job.id.as_str()) {
+            return Ok(None);
+        }
+        Ok(retry
+            .last_repair_at
+            .map(|at| at.saturating_add(self.recovery.repair_cooldown))
+            .filter(|until| *until > chrono::Utc::now().timestamp()))
+    }
+
+    async fn defer(&self, job: &Job, run_id: &str, failure: &ReadFailure) -> Result<()> {
+        let recovery = &self.recovery;
+        let wait = failure
+            .retry_after()
+            .map(|wait| (wait.as_secs() as i64).min(recovery.retry_after_cap));
+        let interval = self.interval;
+        tracing::warn!(portal_id = %job.portal_id, run_id, %failure, "Read deferred after a temporary failure");
+        self.store
+            .defer(
+                job,
+                run_id,
+                &failure.to_string(),
+                |failures| {
+                    let backoff = usize::try_from(failures - 1)
+                        .ok()
+                        .and_then(|index| recovery.backoff.get(index).copied())
+                        .unwrap_or(interval);
+                    wait.map_or(backoff, |wait| wait.max(backoff))
+                },
+                OutageLimit {
+                    failures: recovery.outage_failures,
+                    seconds: recovery.outage_seconds,
+                },
+            )
+            .await
+    }
+
+    /// Applies the publication rule to a candidate read. An incomplete read is rejected
+    /// outright. A complete read publishes without a model call unless `assess` raised a
+    /// signal or `always_audit` is set, in which case the model audits it with the review.
+    async fn check(
+        &self,
+        ctx: &ReasoningContext<'_>,
+        recipe: &Recipe,
+        candidate: CandidateRead,
+        snapshot: &Snapshot<'_>,
+        always_audit: bool,
+    ) -> Result<CandidateRead, (Stage, ReadFailure)> {
+        let review = assess(snapshot, &candidate).map_err(|error| (Stage::Check, error))?;
+        if !always_audit && review.signals.is_empty() {
+            return Ok(candidate);
+        }
+        tracing::info!(
+            portal_id = %ctx.job.portal_id,
+            signals = ?review.signals,
+            "Read needs a model audit"
+        );
+        self.model
+            .verify(ctx, recipe, &candidate, &review)
+            .await
+            .map(|()| candidate)
+            .map_err(|error| (Stage::Verify, error))
     }
 
     async fn repair(
@@ -192,7 +306,7 @@ impl Worker {
         ctx: &ReasoningContext<'_>,
         mut recipe: Recipe,
         mut failure: ReadFailure,
-        prior_open: i64,
+        snapshot: &Snapshot<'_>,
     ) -> Result<()> {
         let job = ctx.job;
         let Some(run_id) = self.store.begin_repair(job, &failure.to_string()).await? else {
@@ -203,7 +317,10 @@ impl Worker {
             match self.model.learn(ctx, Some((&recipe, &reason))).await {
                 Ok(repaired) => recipe = repaired,
                 Err(error @ ReadFailure::Blocked(_)) => {
-                    return self.store.fail(job, &run_id, &error.to_string()).await;
+                    return self
+                        .store
+                        .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
+                        .await;
                 }
                 Err(error) => {
                     failure = error;
@@ -211,12 +328,7 @@ impl Worker {
                 }
             }
             let attempt = match recipe::read(ctx.http, ctx.url, &recipe).await {
-                Ok(candidate) => self
-                    .model
-                    .verify(ctx, &recipe, &candidate, prior_open)
-                    .await
-                    .map(|()| candidate)
-                    .map_err(|error| (Stage::Verify, error)),
+                Ok(candidate) => self.check(ctx, &recipe, candidate, snapshot, true).await,
                 Err(error) => Err((Stage::Read, error)),
             };
             let error = match attempt {
@@ -227,15 +339,30 @@ impl Worker {
                 }
             };
             if let ReadFailure::Blocked(_) = error {
-                return self.store.fail(job, &run_id, &error.to_string()).await;
+                return self
+                    .store
+                    .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
+                    .await;
             }
             failure = error;
         }
+        if failure.is_temporary() {
+            return self.defer(job, &run_id, &failure).await;
+        }
+        self.store.record_repair(job).await?;
+        // With a stored recipe the next read is free. Without one the portal never attached,
+        // and every read would pay to learn again.
+        let retry_in = if job.recipe.is_some() {
+            self.interval
+        } else {
+            self.recovery.recheck
+        };
         self.store
             .fail(
                 job,
                 &run_id,
                 &format!("Repair did not restore delivery: {failure}"),
+                retry_in,
             )
             .await
     }
@@ -259,11 +386,12 @@ impl Worker {
     }
 }
 
-/// Where a recipe attempt failed: while reading the portal, or when the model checked the
-/// candidate read.
+/// Where a recipe attempt failed: while reading the portal, when the read was compared with
+/// the published snapshot, or when the model audited the candidate read.
 #[derive(Clone, Copy, Debug)]
 enum Stage {
     Read,
+    Check,
     Verify,
 }
 
@@ -271,8 +399,261 @@ impl Stage {
     fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Check => "check",
             Self::Verify => "verify",
         }
+    }
+}
+
+/// The published state a candidate read is compared with.
+struct Snapshot<'a> {
+    tenders: &'a [PublishedTender],
+    /// Listing evidence of the last verified read. `None` before the first one, and for
+    /// portals published before this evidence was stored.
+    evidence: Option<&'a StoredEvidence>,
+}
+
+const REVIEW_LIMIT: usize = 20;
+
+/// Fields compared between a published tender and its new read. A change to one of them on at
+/// least two tenders, and on at least a quarter of the open ones, in a single read is treated
+/// as systematic and audited.
+const COMPARED_FIELDS: &[&str] = &[
+    "url",
+    "title",
+    "buyerName",
+    "publicationDate",
+    "submissionDeadline",
+    "status",
+    "documents",
+    "referenceNumber",
+    "description",
+    "procedureType",
+    "contractNature",
+    "cpvCodes",
+    "placeOfPerformance",
+];
+
+/// Applies the publication rule's comparison with the published snapshot.
+///
+/// Returns an error when the read is incomplete: it has no positive end-of-list evidence,
+/// it skipped a listing page that the last verified read fetched and that is still linked, or
+/// more than half of the open tenders (at least two) vanished while the listing shows no empty
+/// state. Otherwise returns a review. Its signals are empty only when nothing suggests the read
+/// is wrong, in which case a repeat read publishes without a model call.
+fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, ReadFailure> {
+    let evidence = &candidate.evidence;
+    if !evidence.terminal_page {
+        return Err(ReadFailure::Incomplete(
+            "Read found no evidence that the listing ended".into(),
+        ));
+    }
+    let mut signals = Vec::new();
+    match snapshot.evidence {
+        Some(prior) => {
+            if let Some(page) = prior.listing_pages.iter().find(|page| {
+                !evidence.listing_pages.contains(page) && evidence.listing_links.contains(*page)
+            }) {
+                return Err(ReadFailure::Incomplete(format!(
+                    "Listing page {} from the last verified read is still linked but was not read",
+                    location(page)
+                )));
+            }
+            if prior.listing_pages.len() != evidence.listing_pages.len() {
+                signals.push(format!(
+                    "The listing spans {} page(s), down or up from {}",
+                    evidence.listing_pages.len(),
+                    prior.listing_pages.len()
+                ));
+            }
+            let new_links = evidence
+                .unfollowed_links
+                .iter()
+                .filter(|link| !prior.unfollowed_links.contains(link))
+                .count();
+            if new_links > 0 {
+                signals.push(format!(
+                    "{new_links} new pagination link(s) on the listing were not followed"
+                ));
+            }
+        }
+        None => signals.push("No verified listing evidence to compare with".into()),
+    }
+
+    let candidates: HashMap<String, &Tender> = candidate
+        .tenders
+        .iter()
+        .filter_map(|tender| Some((tender.key()?, tender)))
+        .collect();
+    let open: Vec<&Tender> = snapshot
+        .tenders
+        .iter()
+        .map(|published| &published.tender)
+        .filter(|tender| tender.status == TenderStatus::Open)
+        .collect();
+    let vanished: Vec<&Tender> = open
+        .iter()
+        .copied()
+        .filter(|tender| {
+            tender
+                .key()
+                .is_none_or(|key| !candidates.contains_key(&key))
+        })
+        .collect();
+    if vanished.len() >= 2 && vanished.len() * 2 > open.len() && !evidence.empty_state {
+        return Err(ReadFailure::Incomplete(format!(
+            "{} of {} open tenders vanished while the listing shows no empty state",
+            vanished.len(),
+            open.len()
+        )));
+    }
+    if !vanished.is_empty() {
+        signals.push(format!(
+            "{} previously open tender(s) are no longer listed",
+            vanished.len()
+        ));
+    }
+
+    let mut changes = Vec::new();
+    let mut changed_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut lost = 0;
+    for old in &open {
+        let Some(new) = old.key().and_then(|key| candidates.get(&key).copied()) else {
+            continue;
+        };
+        if new.documents.len() < old.documents.len()
+            || (old.title.is_some() && new.title.is_none())
+            || (old.buyer_name.is_some() && new.buyer_name.is_none())
+            || (old.submission_deadline.is_some() && new.submission_deadline.is_none())
+        {
+            lost += 1;
+        }
+        let (before, after) = (comparable(old), comparable(new));
+        for field in COMPARED_FIELDS {
+            let (before, after) = (
+                before.get(*field).cloned().unwrap_or(Value::Null),
+                after.get(*field).cloned().unwrap_or(Value::Null),
+            );
+            if before != after {
+                *changed_counts.entry(field).or_default() += 1;
+                if changes.len() < REVIEW_LIMIT {
+                    changes.push(FieldChange {
+                        tender: label(old),
+                        field,
+                        before,
+                        after,
+                    });
+                }
+            }
+        }
+    }
+    if lost > 0 {
+        signals.push(format!(
+            "{lost} tender(s) lost documents, a title, a buyer or a deadline"
+        ));
+    }
+    for (field, count) in &changed_counts {
+        if *count >= 2 && count * 4 >= open.len() {
+            signals.push(format!(
+                "{field} changed on {count} of {} open tenders",
+                open.len()
+            ));
+        }
+    }
+
+    let mut owners: HashMap<&str, Vec<String>> = HashMap::new();
+    for published in snapshot.tenders {
+        if let Some(key) = published.tender.key() {
+            for document in &published.tender.documents {
+                owners
+                    .entry(document.sha256.as_str())
+                    .or_default()
+                    .push(key.clone());
+            }
+        }
+    }
+    let known: HashSet<String> = snapshot
+        .tenders
+        .iter()
+        .filter_map(|published| published.tender.key())
+        .collect();
+    let mut moved_files = Vec::new();
+    for (key, tender) in &candidates {
+        if !known.contains(key) {
+            continue;
+        }
+        for document in &tender.documents {
+            if let Some(from) = owners.get(document.sha256.as_str())
+                && !from.contains(key)
+            {
+                moved_files.push(MovedFile {
+                    file_name: document.file_name.clone(),
+                    sha256: document.sha256.clone(),
+                    from: from.clone(),
+                    to: key.clone(),
+                });
+            }
+        }
+    }
+    if !moved_files.is_empty() {
+        signals.push(format!(
+            "{} file(s) moved from one tender to another",
+            moved_files.len()
+        ));
+        moved_files.truncate(REVIEW_LIMIT);
+    }
+
+    Ok(Review {
+        previous_open_count: open.len(),
+        signals,
+        vanished: vanished
+            .iter()
+            .take(REVIEW_LIMIT)
+            .map(|tender| TenderSummary {
+                id: tender.id.clone(),
+                url: tender.url.clone(),
+                title: tender.title.clone(),
+            })
+            .collect(),
+        changes,
+        moved_files,
+        unfollowed_links: evidence.unfollowed_links.clone(),
+    })
+}
+
+/// A tender as compared field by field. Documents are reduced to their names and hashes.
+fn comparable(tender: &Tender) -> serde_json::Map<String, Value> {
+    let mut value = serde_json::to_value(tender).unwrap_or_default();
+    let documents: Vec<Value> = tender
+        .documents
+        .iter()
+        .map(|document| {
+            Value::String(format!(
+                "{} ({})",
+                document.file_name,
+                &document.sha256[..document.sha256.len().min(12)]
+            ))
+        })
+        .collect();
+    if let Some(map) = value.as_object_mut() {
+        map.insert("documents".into(), Value::Array(documents));
+        return std::mem::take(map);
+    }
+    serde_json::Map::new()
+}
+
+fn label(tender: &Tender) -> String {
+    tender
+        .id
+        .clone()
+        .or_else(|| tender.url.clone())
+        .unwrap_or_default()
+}
+
+fn location(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(url) => format!("{}{}", url.host_str().unwrap_or_default(), url.path()),
+        Err(_) => url.chars().take(240).collect(),
     }
 }
 
@@ -354,5 +735,117 @@ mod tests {
         ] {
             assert!(line.contains(expected), "missing {expected:?} in {line}");
         }
+    }
+
+    fn tender(id: &str, files: &[(&str, &str)]) -> Tender {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "url": format!("https://portal.example/{id}"), "title": format!("Tender {id}"),
+            "buyerName": "City", "publicationDate": null, "submissionDeadline": null, "status": "open",
+            "documents": files.iter().map(|(name, sha)| serde_json::json!({
+                "fileName": name, "sizeBytes": 1, "sha256": sha, "path": format!("/files/{sha}")
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    }
+
+    fn candidate(tenders: Vec<Tender>, pages: &[&str]) -> CandidateRead {
+        CandidateRead {
+            evidence: crate::domain::Evidence {
+                pages: pages.len(),
+                entries: tenders.len(),
+                terminal_page: true,
+                end_of_list: "last-page",
+                total: None,
+                empty_state: false,
+                document_count: 0,
+                listing_pages: pages.iter().map(|page| page.to_string()).collect(),
+                unfollowed_links: Vec::new(),
+                samples: Vec::new(),
+                listing_links: HashSet::new(),
+            },
+            tenders,
+        }
+    }
+
+    fn published(tenders: Vec<Tender>) -> Vec<PublishedTender> {
+        tenders
+            .into_iter()
+            .map(|tender| PublishedTender {
+                tender,
+                last_changed_at: chrono::Utc::now(),
+            })
+            .collect()
+    }
+
+    const SHARED: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    const OWN_A: &str = "00000000000000000000000000000000000000000000000000000000000000aa";
+    const OWN_B: &str = "00000000000000000000000000000000000000000000000000000000000000bb";
+
+    #[test]
+    fn shared_boilerplate_is_not_a_moved_file_but_an_own_file_is() {
+        let page = ["https://portal.example/"];
+        let before = published(vec![
+            tender("A", &[("terms.pdf", SHARED), ("a.pdf", OWN_A)]),
+            tender("B", &[("terms.pdf", SHARED), ("b.pdf", OWN_B)]),
+        ]);
+        let prior = StoredEvidence {
+            listing_pages: vec![page[0].into()],
+            unfollowed_links: Vec::new(),
+        };
+        let snapshot = Snapshot {
+            tenders: &before,
+            evidence: Some(&prior),
+        };
+        let same = candidate(
+            vec![
+                tender("A", &[("terms.pdf", SHARED), ("a.pdf", OWN_A)]),
+                tender("B", &[("terms.pdf", SHARED), ("b.pdf", OWN_B)]),
+            ],
+            &page,
+        );
+        let review = assess(&snapshot, &same).unwrap();
+        assert!(review.signals.is_empty(), "{:?}", review.signals);
+
+        let swapped = candidate(
+            vec![
+                tender("A", &[("terms.pdf", SHARED), ("b.pdf", OWN_B)]),
+                tender("B", &[("terms.pdf", SHARED), ("a.pdf", OWN_A)]),
+            ],
+            &page,
+        );
+        let review = assess(&snapshot, &swapped).unwrap();
+        assert_eq!(review.moved_files.len(), 2);
+        assert!(review.signals.iter().any(|signal| signal.contains("moved")));
+        assert!(
+            review
+                .signals
+                .iter()
+                .any(|signal| signal.contains("documents changed on 2 of 2"))
+        );
+    }
+
+    #[test]
+    fn one_amended_tender_among_many_needs_no_audit() {
+        let page = ["https://portal.example/"];
+        let ids = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
+        let before = published(ids.iter().map(|id| tender(id, &[])).collect());
+        let prior = StoredEvidence {
+            listing_pages: vec![page[0].into()],
+            unfollowed_links: Vec::new(),
+        };
+        let snapshot = Snapshot {
+            tenders: &before,
+            evidence: Some(&prior),
+        };
+        let mut tenders: Vec<_> = ids.iter().map(|id| tender(id, &[])).collect();
+        tenders[0].title = Some("Tender A, amended".into());
+        tenders[1].title = Some("Tender B, amended".into());
+        let review = assess(&snapshot, &candidate(tenders, &page)).unwrap();
+        assert_eq!(review.changes.len(), 2);
+        assert!(
+            review.signals.is_empty(),
+            "two of nine is below a quarter: {:?}",
+            review.signals
+        );
     }
 }

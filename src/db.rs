@@ -1,5 +1,6 @@
 use crate::domain::{
-    CandidateRead, ModelOperation, ModelUsage, Portal, PublishedTender, Run, TenderStatus,
+    CandidateRead, ModelOperation, ModelUsage, Portal, PublishedTender, Run, StoredEvidence,
+    TenderStatus,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -21,6 +22,24 @@ pub struct Job {
     pub url: String,
     pub recipe: Option<String>,
     pub last_success_at: Option<String>,
+}
+
+/// Retry bookkeeping for one portal generation.
+#[derive(Clone, Debug, Default, FromRow)]
+pub struct RetryState {
+    /// Temporary failures since the last published read.
+    pub temporary_failures: i64,
+    /// When a repair last ran out of attempts, as a Unix timestamp.
+    pub last_repair_at: Option<i64>,
+    /// The run a person asked for with a manual refresh.
+    pub manual_run: Option<String>,
+}
+
+/// When a run of temporary failures turns a portal failed.
+#[derive(Clone, Copy, Debug)]
+pub struct OutageLimit {
+    pub failures: i64,
+    pub seconds: i64,
 }
 
 const PORTAL_COLUMNS: &str = "id, url, state, reason, tender_count, last_success_at";
@@ -108,16 +127,22 @@ impl Store {
         };
         let existing: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE portal_id = ? AND generation = ? AND kind = 'read' AND finished_at IS NULL")
             .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
-        if let Some(run_id) = existing {
-            return Ok(Some(run_id));
-        }
-        let run_id = Uuid::new_v4().to_string();
-        sqlx::query(INSERT_RUN)
-            .bind(&run_id)
-            .bind(id)
-            .bind(generation)
-            .execute(&mut *tx)
-            .await?;
+        let run_id = match existing {
+            Some(run_id) => run_id,
+            None => {
+                let run_id = Uuid::new_v4().to_string();
+                sqlx::query(INSERT_RUN)
+                    .bind(&run_id)
+                    .bind(id)
+                    .bind(generation)
+                    .execute(&mut *tx)
+                    .await?;
+                run_id
+            }
+        };
+        // A manual refresh may start a repair even while the repair cooldown runs.
+        sqlx::query("INSERT INTO portal_retry(portal_id, generation, manual_run) VALUES(?, ?, ?) ON CONFLICT(portal_id, generation) DO UPDATE SET manual_run = excluded.manual_run")
+            .bind(id).bind(generation).bind(&run_id).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(Some(run_id))
     }
@@ -127,7 +152,14 @@ impl Store {
         let generation: Option<i64> = sqlx::query_scalar("UPDATE portals SET deleted = 1, next_read_at = NULL WHERE id = ? AND deleted = 0 RETURNING generation")
             .bind(id).fetch_optional(&mut *tx).await?;
         if let Some(generation) = generation {
-            for table in ["runs", "tenders", "portal_files", "model_usage"] {
+            for table in [
+                "runs",
+                "tenders",
+                "portal_files",
+                "model_usage",
+                "read_evidence",
+                "portal_retry",
+            ] {
                 sqlx::query(&format!(
                     "DELETE FROM {table} WHERE portal_id = ? AND generation = ?"
                 ))
@@ -172,13 +204,12 @@ impl Store {
         let job: Option<Job> = sqlx::query_as("SELECT r.id, r.portal_id, r.generation, p.url, p.recipe, p.last_success_at FROM runs r JOIN portals p ON p.id = r.portal_id AND p.generation = r.generation WHERE p.deleted = 0 AND r.started_at IS NULL AND NOT EXISTS (SELECT 1 FROM runs active WHERE active.portal_id = r.portal_id AND active.generation = r.generation AND active.started_at IS NOT NULL AND active.finished_at IS NULL) ORDER BY r.rowid LIMIT 1")
             .fetch_optional(&mut *tx).await?;
         if let Some(ref job) = job {
-            let state = if job.last_success_at.is_none() {
-                "integrating"
-            } else {
-                "healing"
-            };
-            sqlx::query("UPDATE portals SET state = ?, reason = 'Retrying portal read' WHERE id = ? AND state = 'failed'")
-                .bind(state).bind(&job.portal_id).execute(&mut *tx).await?;
+            // A failed attach is attaching again. A portal that served before stays failed
+            // until a read publishes or a repair starts, because a plain read is no repair.
+            if job.last_success_at.is_none() {
+                sqlx::query("UPDATE portals SET state = 'integrating', reason = 'Retrying portal read' WHERE id = ? AND state = 'failed'")
+                    .bind(&job.portal_id).execute(&mut *tx).await?;
+            }
             sqlx::query("UPDATE runs SET started_at = ? WHERE id = ?")
                 .bind(Utc::now().to_rfc3339())
                 .bind(&job.id)
@@ -219,10 +250,13 @@ impl Store {
         Ok(Some(id))
     }
 
-    pub async fn fail(&self, job: &Job, run_id: &str, reason: &str) -> Result<()> {
+    /// Marks the portal failed and schedules its next read `retry_in` seconds from now. A failed
+    /// portal keeps being read, so it recovers without a person once the portal does.
+    pub async fn fail(&self, job: &Job, run_id: &str, reason: &str, retry_in: i64) -> Result<()> {
         let mut tx = self.0.begin().await?;
-        sqlx::query("UPDATE portals SET state = 'failed', reason = ?, next_read_at = NULL WHERE id = ? AND generation = ? AND deleted = 0")
-            .bind(reason).bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?;
+        sqlx::query("UPDATE portals SET state = 'failed', reason = ?, next_read_at = ? WHERE id = ? AND generation = ? AND deleted = 0")
+            .bind(reason).bind(Utc::now().timestamp().saturating_add(retry_in))
+            .bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?;
         sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE id = ?")
             .bind(Utc::now().to_rfc3339())
             .bind(run_id)
@@ -232,11 +266,11 @@ impl Store {
         Ok(())
     }
 
-    pub async fn fail_job(&self, job: &Job, reason: &str) -> Result<()> {
+    pub async fn fail_job(&self, job: &Job, reason: &str, retry_in: i64) -> Result<()> {
         let run: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE portal_id = ? AND generation = ? AND started_at IS NOT NULL AND finished_at IS NULL")
             .bind(&job.portal_id).bind(job.generation).fetch_optional(&self.0).await?;
         if let Some(run) = run {
-            self.fail(job, &run, reason).await?;
+            self.fail(job, &run, reason, retry_in).await?;
         }
         Ok(())
     }
@@ -253,6 +287,7 @@ impl Store {
             candidate.evidence.terminal_page,
             "cannot publish incomplete pagination"
         );
+        let evidence = serde_json::to_string(&StoredEvidence::from(&candidate.evidence))?;
         let now = Utc::now();
         let mut tx = self.0.begin().await?;
         let changed = sqlx::query("UPDATE portals SET state = 'serving', reason = 'Last read verified', last_success_at = ?, next_read_at = ?, recipe = ? WHERE id = ? AND generation = ? AND deleted = 0")
@@ -261,6 +296,10 @@ impl Store {
         if changed == 0 {
             return Ok(());
         }
+        sqlx::query("INSERT INTO read_evidence(portal_id, generation, payload) VALUES(?, ?, ?) ON CONFLICT(portal_id, generation) DO UPDATE SET payload = excluded.payload")
+            .bind(&job.portal_id).bind(job.generation).bind(evidence).execute(&mut *tx).await?;
+        sqlx::query("UPDATE portal_retry SET temporary_failures = 0, last_repair_at = NULL WHERE portal_id = ? AND generation = ?")
+            .bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?;
 
         let previous: Vec<(String, String)> = sqlx::query_as(
             "SELECT tender_key, payload FROM tenders WHERE portal_id = ? AND generation = ?",
@@ -353,6 +392,120 @@ impl Store {
         }
         tx.commit().await?;
         Ok(Some(tenders))
+    }
+
+    pub async fn retry_state(&self, job: &Job) -> Result<RetryState> {
+        Ok(sqlx::query_as("SELECT temporary_failures, last_repair_at, manual_run FROM portal_retry WHERE portal_id = ? AND generation = ?")
+            .bind(&job.portal_id).bind(job.generation).fetch_optional(&self.0).await?
+            .unwrap_or_default())
+    }
+
+    /// Records a repair that ran out of attempts, which starts the repair cooldown.
+    pub async fn record_repair(&self, job: &Job) -> Result<()> {
+        sqlx::query("INSERT INTO portal_retry(portal_id, generation, last_repair_at) VALUES(?, ?, ?) ON CONFLICT(portal_id, generation) DO UPDATE SET last_repair_at = excluded.last_repair_at")
+            .bind(&job.portal_id).bind(job.generation).bind(Utc::now().timestamp()).execute(&self.0).await?;
+        Ok(())
+    }
+
+    /// Records a temporary failure and schedules a retry with backoff.
+    ///
+    /// The portal keeps its state and its published tenders until `limit` is reached: the
+    /// consecutive failure count, or the time since the last success (or, before one, since
+    /// the first read began). Past that limit it becomes failed and keeps being retried at the
+    /// regular interval. A repair cut short by a temporary failure also ends failed, because
+    /// the read that started it had already shown the portal broken.
+    pub async fn defer(
+        &self,
+        job: &Job,
+        run_id: &str,
+        failure: &str,
+        retry_in: impl Fn(i64) -> i64,
+        limit: OutageLimit,
+    ) -> Result<()> {
+        let now = Utc::now();
+        let mut tx = self.0.begin().await?;
+        let failures: i64 = sqlx::query_scalar("INSERT INTO portal_retry(portal_id, generation, temporary_failures) VALUES(?, ?, 1) ON CONFLICT(portal_id, generation) DO UPDATE SET temporary_failures = temporary_failures + 1 RETURNING temporary_failures")
+            .bind(&job.portal_id).bind(job.generation).fetch_one(&mut *tx).await?;
+        let portal: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT state, last_success_at FROM portals WHERE id = ? AND generation = ? AND deleted = 0",
+        )
+        .bind(&job.portal_id)
+        .bind(job.generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((state, last_success)) = portal else {
+            return Ok(());
+        };
+        let since = match last_success {
+            Some(time) => Some(time),
+            None => {
+                sqlx::query_scalar(
+                    "SELECT MIN(started_at) FROM runs WHERE portal_id = ? AND generation = ?",
+                )
+                .bind(&job.portal_id)
+                .bind(job.generation)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+        };
+        let outage = since
+            .and_then(|time| DateTime::parse_from_rfc3339(&time).ok())
+            .map_or(0, |time| (now - time.with_timezone(&Utc)).num_seconds());
+        let exhausted = failures >= limit.failures || outage >= limit.seconds;
+        let next = now.timestamp().saturating_add(retry_in(failures));
+        let at = DateTime::from_timestamp(next, 0)
+            .unwrap_or(now)
+            .to_rfc3339();
+        let (state, reason) = match state.as_str() {
+            "failed" => (state, None),
+            "healing" => (
+                "failed".to_owned(),
+                Some(format!(
+                    "Repair interrupted by a temporary failure: {failure}. Retrying at {at}"
+                )),
+            ),
+            _ if exhausted => (
+                "failed".to_owned(),
+                Some(format!(
+                    "Portal unavailable after {failures} attempt(s): {failure}. Retrying at {at}"
+                )),
+            ),
+            "integrating" => (
+                state,
+                Some(format!(
+                    "Attach paused by a temporary failure: {failure}. Retrying at {at}"
+                )),
+            ),
+            _ => (
+                state,
+                Some(format!(
+                    "Last read failed temporarily: {failure}. Retrying at {at}"
+                )),
+            ),
+        };
+        sqlx::query("UPDATE portals SET state = ?, reason = COALESCE(?, reason), next_read_at = ? WHERE id = ? AND generation = ? AND deleted = 0")
+            .bind(state).bind(reason).bind(next).bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?;
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE id = ?")
+            .bind(now.to_rfc3339())
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The listing evidence of the portal's last verified read, if one was stored.
+    pub async fn evidence(&self, job: &Job) -> Result<Option<StoredEvidence>> {
+        let payload: Option<String> = sqlx::query_scalar(
+            "SELECT payload FROM read_evidence WHERE portal_id = ? AND generation = ?",
+        )
+        .bind(&job.portal_id)
+        .bind(job.generation)
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(payload
+            .map(|payload| serde_json::from_str(&payload))
+            .transpose()?)
     }
 
     pub async fn runs(&self, id: &str) -> Result<Option<Vec<Run>>> {

@@ -4,6 +4,7 @@ use crate::{
         TenderStatus,
     },
     fetch::{DocumentResponse, Page, PortalHttp, public_http},
+    metadata,
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
@@ -104,25 +105,35 @@ const FIELDS: &[&str] = &[
 
 impl Recipe {
     pub fn validate(&self) -> Result<()> {
-        validate_path(self.listing, &self.items)?;
+        if matches!(self.listing, Format::Html) {
+            ensure!(
+                !self.items.trim().is_empty(),
+                "items needs a nonempty CSS selector for HTML rows"
+            );
+        }
+        validate_path(self.listing, &self.items).context("items")?;
         let detail_format = self.detail_format.unwrap_or(self.listing);
-        for (format, fields) in [
-            (self.listing, &self.list_fields),
-            (detail_format, &self.detail_fields),
+        for (name, format, fields) in [
+            ("list_fields", self.listing, &self.list_fields),
+            ("detail_fields", detail_format, &self.detail_fields),
         ] {
             for (field, rule) in fields {
                 ensure!(
                     FIELDS.contains(&field.as_str()),
                     "unknown tender field: {field}"
                 );
-                validate_path(format, &rule.path)?;
+                validate_path(format, &rule.path).with_context(|| format!("{name}.{field}"))?;
             }
         }
-        for rule in [&self.next, &self.total, &self.empty, &self.detail_link]
-            .into_iter()
-            .flatten()
-        {
-            validate_path(self.listing, &rule.path)?;
+        for (name, rule) in [
+            ("next", &self.next),
+            ("total", &self.total),
+            ("empty", &self.empty),
+            ("detail_link", &self.detail_link),
+        ] {
+            if let Some(rule) = rule {
+                validate_path(self.listing, &rule.path).with_context(|| name)?;
+            }
         }
         let tender_format = if self.detail_link.is_some() {
             detail_format
@@ -130,10 +141,10 @@ impl Recipe {
             self.listing
         };
         if let Some(rule) = &self.document_page {
-            validate_path(tender_format, &rule.path)?;
+            validate_path(tender_format, &rule.path).context("document_page")?;
         }
         if let Some(rule) = &self.direct_documents {
-            validate_path(tender_format, &rule.path)?;
+            validate_path(tender_format, &rule.path).context("direct_documents")?;
         }
         let document_format = self.document_format.unwrap_or(Format::Html);
         if let Some(rule) = &self.nested_document_pages {
@@ -141,7 +152,7 @@ impl Recipe {
                 self.document_page.is_some(),
                 "nested document pages need a document page selector"
             );
-            validate_path(document_format, &rule.path)?;
+            validate_path(document_format, &rule.path).context("nested_document_pages")?;
         }
         if let Some(rule) = &self.documents {
             let format = if self.document_page.is_some() {
@@ -149,7 +160,7 @@ impl Recipe {
             } else {
                 tender_format
             };
-            validate_path(format, &rule.path)?;
+            validate_path(format, &rule.path).context("documents")?;
         }
         if let Some(timezone) = &self.timezone {
             ensure!(timezone.parse::<Tz>().is_ok(), "invalid IANA timezone");
@@ -297,13 +308,28 @@ struct Attachments {
     files: Vec<Url>,
     /// The HTML fallback found these links, not recipe selectors.
     fallback: bool,
+    scope: Option<String>,
 }
 
 struct ListingPage {
     rows: Vec<ListingRow>,
     next: Option<Url>,
     total: Option<usize>,
+    /// The page shows the recipe's empty state or a total of 0.
+    empty_state: bool,
+    links: ListingLinks,
 }
+
+#[derive(Default)]
+struct ListingLinks {
+    /// Every same-origin link on an HTML listing page, without fragments.
+    all: HashSet<String>,
+    /// Links marked as pagination: `rel=next`, or a next, pager or pagination class, ID or
+    /// label on the link or a close ancestor.
+    pagination: Vec<Url>,
+}
+
+const UNFOLLOWED_LINK_LIMIT: usize = 20;
 
 pub async fn read(
     http: &PortalHttp,
@@ -317,16 +343,25 @@ pub async fn read(
     };
     let mut next = Some(start);
     let mut seen_pages = HashSet::new();
+    let mut listing_pages = Vec::new();
+    let mut fetched = HashSet::new();
+    let mut listing_links = HashSet::new();
+    let mut pagination_links = Vec::new();
     let mut listing_rows = Vec::new();
     let mut samples = Vec::new();
     let mut total = None;
-    while let Some(url) = next.take() {
+    let mut empty_state = false;
+    while let Some(mut url) = next.take() {
+        url.set_fragment(None);
         if seen_pages.len() >= 250 || !seen_pages.insert(url.clone()) {
             return Err(ReadFailure::Incomplete(
                 "Pagination loop or page limit reached".into(),
             ));
         }
+        listing_pages.push(url.to_string());
+        fetched.insert(url.to_string());
         let page = http.page(url).await?;
+        fetched.insert(without_fragment(&page.url));
         if samples.len() < 3 {
             samples.push(sample_page(&page, 16_000).body);
         }
@@ -339,6 +374,9 @@ pub async fn read(
             }
             total = Some(count);
         }
+        empty_state |= listing.empty_state;
+        listing_links.extend(listing.links.all);
+        pagination_links.extend(listing.links.pagination);
         listing_rows.extend(listing.rows);
         next = listing.next;
     }
@@ -347,6 +385,25 @@ pub async fn read(
             "Read did not match the source listing total".into(),
         ));
     }
+    let end_of_list = if listing_rows.is_empty() && empty_state {
+        "empty"
+    } else if total.is_some() {
+        "total"
+    } else if recipe.total.is_some() {
+        return Err(ReadFailure::Incomplete(
+            "Listing total selector matched nothing, so the read cannot show it is complete".into(),
+        ));
+    } else {
+        "last-page"
+    };
+    let mut unfollowed_links: Vec<String> = pagination_links
+        .iter()
+        .map(without_fragment)
+        .filter(|link| !fetched.contains(link))
+        .collect();
+    unfollowed_links.sort();
+    unfollowed_links.dedup();
+    unfollowed_links.truncate(UNFOLLOWED_LINK_LIMIT);
     let entries = listing_rows.len();
     let mut tenders = Vec::with_capacity(entries);
     let mut identities = HashSet::new();
@@ -391,8 +448,14 @@ pub async fn read(
             pages: seen_pages.len(),
             entries,
             terminal_page: true,
+            end_of_list,
+            total,
+            empty_state,
             document_count,
+            listing_pages,
+            unfollowed_links,
             samples,
+            listing_links,
         },
     })
 }
@@ -401,17 +464,21 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
     let source = Source::parse(recipe.listing, &page.body)?;
     let root = source.root();
     let next = resolve_one(&root, recipe.next.as_ref(), &page.url)?;
-    let total = recipe
-        .total
+    let total = match recipe.total.as_ref().and_then(|rule| root.first(rule)) {
+        Some(text) => Some(parse_total(&text).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Listing total no longer parses as a count: {:?}",
+                sample(&text, 80)
+            )
+        })?),
+        None => None,
+    };
+    let empty = recipe
+        .empty
         .as_ref()
-        .and_then(|rule| root.first(rule))
-        .and_then(|value| value.parse().ok());
+        .is_some_and(|rule| root.first(rule).is_some());
     let items = source.items(&recipe.items)?;
     if items.is_empty() {
-        let empty = recipe
-            .empty
-            .as_ref()
-            .is_some_and(|rule| root.first(rule).is_some());
         let json_empty = matches!(recipe.listing, Format::Json) && next.is_none();
         ensure!(
             empty || json_empty || total == Some(0),
@@ -438,7 +505,79 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
             attachments,
         });
     }
-    Ok(ListingPage { rows, next, total })
+    Ok(ListingPage {
+        rows,
+        next,
+        total,
+        empty_state: empty || total == Some(0),
+        links: listing_links(&source, &page.url),
+    })
+}
+
+/// Reads a listing total. Accepts a plain count or one grouped in thousands, such as `1.234`
+/// or `1 234`. Anything else, such as `57 results`, is rejected so that a changed total cannot
+/// silently disappear.
+fn parse_total(text: &str) -> Option<usize> {
+    let text = text.trim();
+    if let Ok(count) = text.parse() {
+        return Some(count);
+    }
+    let groups: Vec<&str> = text
+        .split(['.', ',', ' ', '\u{a0}', '\u{202f}', '\''])
+        .collect();
+    let digits = |group: &str| !group.is_empty() && group.bytes().all(|ch| ch.is_ascii_digit());
+    let grouped = groups.len() > 1
+        && groups[0].len() <= 3
+        && groups.iter().all(|group| digits(group))
+        && groups[1..].iter().all(|group| group.len() == 3);
+    grouped.then(|| groups.concat().parse().ok()).flatten()
+}
+
+fn without_fragment(url: &Url) -> String {
+    let mut url = url.clone();
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn listing_links(source: &Source, base: &Url) -> ListingLinks {
+    let Source::Html(html) = source else {
+        return ListingLinks::default();
+    };
+    let anchors = Selector::parse("a[href]").unwrap();
+    let mut links = ListingLinks::default();
+    for anchor in html.select(&anchors) {
+        let Some(url) = anchor
+            .value()
+            .attr("href")
+            .and_then(|href| base.join(href.trim()).ok())
+            .filter(|url| url.origin() == base.origin())
+        else {
+            continue;
+        };
+        if pagination_link(anchor) {
+            links.pagination.push(url.clone());
+        }
+        links.all.insert(without_fragment(&url));
+    }
+    links
+}
+
+fn pagination_link(anchor: ElementRef<'_>) -> bool {
+    let marked = |element: ElementRef<'_>, terms: &[&str]| {
+        ["class", "id", "aria-label", "rel"]
+            .into_iter()
+            .filter_map(|name| element.value().attr(name))
+            .any(|value| {
+                let value = value.to_ascii_lowercase();
+                terms.iter().any(|term| value.contains(term))
+            })
+    };
+    marked(anchor, &["next", "pager", "pagination"])
+        || anchor
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .take(3)
+            .any(|element| marked(element, &["pager", "pagination"]))
 }
 
 /// Reads a tender detail page. Detail pages on one portal can use different templates, so
@@ -450,6 +589,36 @@ fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
     let root = source.root();
     let mut fields = extract(&root, &recipe.detail_fields);
     resolve_field_url(&mut fields, &page.url);
+    if let Source::Html(document) = &source {
+        let content = main_content(document);
+        let gov_uk = page.url.host_str() == Some("www.gov.uk");
+        if !fields.contains_key("buyerName")
+            && let Some(buyer) = metadata::buyer(content, gov_uk)
+        {
+            fields.insert("buyerName".into(), vec![buyer]);
+        }
+        if !fields.contains_key("publicationDate")
+            && let Some(date) = metadata::publication_date(content)
+        {
+            fields.insert("publicationDate".into(), vec![date.to_string()]);
+        }
+        let timezone = recipe
+            .timezone
+            .as_deref()
+            .and_then(|name| name.parse().ok())
+            .or_else(|| gov_uk.then_some(chrono_tz::Europe::London));
+        if fields
+            .get("submissionDeadline")
+            .and_then(|values| values.first())
+            .and_then(|value| deadline(value, recipe))
+            .is_none()
+            && let Some(timezone) = timezone
+            && let Some(date) = metadata::submission_deadline(content, timezone)
+        {
+            fields.insert("submissionDeadline".into(), vec![date.to_rfc3339()]);
+        }
+    }
+
     let mut attachments = find_documents(&root, recipe, &page.url)?;
     let selects_documents = recipe.document_page.is_some()
         || recipe.direct_documents.is_some()
@@ -479,6 +648,7 @@ fn parse_documents(page: &Page, recipe: &Recipe) -> Result<Attachments> {
         pages: resolve_many(&root, recipe.nested_document_pages.as_ref(), &page.url)?,
         files: resolve_many(&root, recipe.documents.as_ref(), &page.url)?,
         fallback: false,
+        scope: None,
     })
 }
 
@@ -492,6 +662,7 @@ fn find_documents(node: &Node<'_>, recipe: &Recipe, base: &Url) -> Result<Attach
         pages,
         files,
         fallback: false,
+        scope: None,
     })
 }
 
@@ -518,6 +689,7 @@ struct QueuedLink {
     depth: usize,
     source: LinkSource,
     referrer: Option<Url>,
+    scope: Option<String>,
 }
 
 async fn attachment_files(
@@ -529,13 +701,14 @@ async fn attachment_files(
 ) -> Result<Vec<Document>, ReadFailure> {
     const MAX_PAGES: usize = 32;
     const MAX_DEPTH: usize = 3;
-    let queue = |urls: Vec<Url>, depth, source, referrer: &Option<Url>| {
+    let queue = |urls: Vec<Url>, depth, source, referrer: &Option<Url>, scope: Option<&str>| {
         urls.into_iter()
             .map(|url| QueuedLink {
                 url,
                 depth,
                 source,
                 referrer: referrer.clone(),
+                scope: scope.map(str::to_owned),
             })
             .collect::<Vec<_>>()
     };
@@ -544,8 +717,14 @@ async fn attachment_files(
     } else {
         LinkSource::Recipe
     };
-    let mut pages = VecDeque::from(queue(attachments.pages, 1, initial, &referrer));
-    let mut files = VecDeque::from(queue(attachments.files, 0, initial, &referrer));
+    let mut pages = VecDeque::from(queue(
+        attachments.pages,
+        1,
+        initial,
+        &referrer,
+        attachments.scope.as_deref(),
+    ));
+    let mut files = VecDeque::from(queue(attachments.files, 0, initial, &referrer, None));
     let mut visited = HashSet::new();
     let mut downloaded = HashSet::new();
     let mut page_files = HashSet::new();
@@ -597,13 +776,25 @@ async fn attachment_files(
         }
         fetched += 1;
         visited.insert(page.url.clone());
-        let (more, source) =
-            attachment_page_links(&page, recipe, is_page, link.source, link.referrer.as_ref())
-                .map_err(incomplete)?;
+        let (more, source) = attachment_page_links(
+            &page,
+            recipe,
+            is_page,
+            link.source,
+            link.referrer.as_ref(),
+            link.scope.as_deref(),
+        )
+        .map_err(incomplete)?;
         page_files.extend(more.files.iter().cloned());
         let here = Some(page.url.clone());
-        files.extend(queue(more.files, depth, source, &here));
-        pages.extend(queue(more.pages, depth + 1, source, &here));
+        files.extend(queue(more.files, depth, source, &here, None));
+        pages.extend(queue(
+            more.pages,
+            depth + 1,
+            source,
+            &here,
+            more.scope.as_deref(),
+        ));
         if samples.len() < 5 {
             samples.push(sample_page(&page, 16_000).body);
         }
@@ -629,6 +820,7 @@ fn attachment_page_links(
     expected_page: bool,
     source: LinkSource,
     referrer: Option<&Url>,
+    scope: Option<&str>,
 ) -> Result<(Attachments, LinkSource)> {
     let json = matches!(recipe.document_format, Some(Format::Json));
     let use_recipe = source == LinkSource::Recipe
@@ -640,7 +832,7 @@ fn attachment_page_links(
     };
     let mut found_by = LinkSource::Recipe;
     if found.pages.is_empty() && found.files.is_empty() && !(use_recipe && json) {
-        found = html_attachment_links(page);
+        found = scoped_html_attachment_links(page, scope);
         found_by = LinkSource::Fallback;
     }
     ensure!(
@@ -661,10 +853,14 @@ fn location(url: &Url) -> String {
 }
 
 fn html_attachment_links(page: &Page) -> Attachments {
+    scoped_html_attachment_links(page, None)
+}
+
+fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments {
     let document = Html::parse_document(&page.body);
     let content = main_content(&document);
     let anchors = Selector::parse("a[href]").unwrap();
-    let mut candidates = HashSet::new();
+    let mut candidates = BTreeMap::new();
     let mut files = Vec::new();
     for anchor in content.select(&anchors) {
         let Some(href) = anchor
@@ -705,7 +901,8 @@ fn html_attachment_links(page: &Page) -> Attachments {
                 )
             })
         {
-            files.push(url);
+            let label = anchor.text().collect::<Vec<_>>().join(" ");
+            files.push((url, label));
         } else if url.origin() == page.url.origin()
             && anchor
                 .text()
@@ -723,19 +920,63 @@ fn html_attachment_links(page: &Page) -> Attachments {
                     )
                 })
         {
-            candidates.insert(url);
+            candidates
+                .entry(url)
+                .or_insert_with(|| anchor.text().collect::<Vec<_>>().join(" "));
         }
     }
-    let pages = if files.is_empty() && candidates.len() == 1 {
-        candidates.into_iter().collect()
+    if let Some(scope) = scope {
+        let terms = attachment_scope_terms(scope);
+        let matches: Vec<_> = files
+            .iter()
+            .filter(|(url, title)| {
+                let description = format!("{title} {}", url.path());
+                let words = attachment_scope_terms(&description);
+                terms.iter().any(|word| words.contains(word))
+            })
+            .cloned()
+            .collect();
+        if !matches.is_empty() {
+            files = matches;
+        }
+    }
+    let (pages, scope) = if files.is_empty() && candidates.len() == 1 {
+        let (page, label) = candidates.into_iter().next().unwrap();
+        (vec![page], Some(label))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     Attachments {
         pages,
-        files,
+        files: files.into_iter().map(|(url, _)| url).collect(),
         fallback: true,
+        scope,
     }
+}
+
+fn attachment_scope_terms(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphabetic())
+        .filter_map(|word| {
+            let word = word.to_ascii_lowercase();
+            (word.len() >= 5
+                && !matches!(
+                    word.as_str(),
+                    "forms"
+                        | "guidance"
+                        | "document"
+                        | "documents"
+                        | "attachment"
+                        | "attachments"
+                        | "download"
+                        | "related"
+                        | "standard"
+                        | "contract"
+                        | "tender"
+                        | "further"
+                ))
+            .then_some(word)
+        })
+        .collect()
 }
 
 fn resolve_one(node: &Node<'_>, select: Option<&Select>, base: &Url) -> Result<Option<Url>> {
@@ -913,8 +1154,14 @@ fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
         title: get("title"),
         buyer_name: get("buyerName"),
         publication_date: get("publicationDate").and_then(|value| {
-            NaiveDate::parse_from_str(&value, recipe.date_format.as_deref().unwrap_or("%Y-%m-%d"))
+            NaiveDate::parse_from_str(&value, "%Y-%m-%d")
                 .ok()
+                .or_else(|| {
+                    recipe
+                        .date_format
+                        .as_deref()
+                        .and_then(|format| NaiveDate::parse_from_str(&value, format).ok())
+                })
                 .or_else(|| {
                     DateTime::parse_from_rfc3339(&value)
                         .ok()
@@ -1076,5 +1323,42 @@ mod sample_tests {
         assert_eq!(evidence.body, page.body);
         assert_eq!(evidence.links[0].url, "https://files.example/spec.pdf");
         assert_eq!(sample_page(&page, 5).body, "{\"ten");
+    }
+
+    #[test]
+    fn totals_parse_plain_or_grouped_counts_only() {
+        assert_eq!(parse_total("57"), Some(57));
+        assert_eq!(parse_total(" 1.234 "), Some(1234));
+        assert_eq!(parse_total("1,234,567"), Some(1_234_567));
+        assert_eq!(parse_total("1\u{a0}234"), Some(1234));
+        for text in ["57 results", "1–20 of 57", "12.5", "1.23", ""] {
+            assert_eq!(parse_total(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn listing_links_mark_pagination_but_not_page_layout_classes() {
+        let base = Url::parse("https://portal.example/list").unwrap();
+        let html = r#"<div class="page-wrapper"><main>
+            <a href="/tender/1">Tender</a>
+            <a href="?page=2" rel="next">2</a>
+            <a class="pager-last" href="?page=9">Last</a>
+            <nav aria-label="Pagination"><ul><li><a href="?page=3">3</a></li></ul></nav>
+            <a href="https://elsewhere.example/?page=2" class="next">Other site</a>
+            <a href="/help#top">Help</a></main></div>"#;
+        let links = listing_links(&Source::Html(Html::parse_document(html)), &base);
+        let mut pagination: Vec<_> = links.pagination.iter().map(Url::as_str).collect();
+        pagination.sort_unstable();
+        assert_eq!(
+            pagination,
+            [
+                "https://portal.example/list?page=2",
+                "https://portal.example/list?page=3",
+                "https://portal.example/list?page=9",
+            ]
+        );
+        assert!(links.all.contains("https://portal.example/help"));
+        assert!(links.all.contains("https://portal.example/tender/1"));
+        assert!(!links.all.iter().any(|link| link.contains("elsewhere")));
     }
 }

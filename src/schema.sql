@@ -24,3 +24,12 @@ CREATE TABLE IF NOT EXISTS model_usage (
     portal_id TEXT NOT NULL, generation INTEGER NOT NULL, operation TEXT NOT NULL, model TEXT NOT NULL,
     input_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS read_evidence (
+    portal_id TEXT NOT NULL, generation INTEGER NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (portal_id, generation)
+);
+CREATE TABLE IF NOT EXISTS portal_retry (
+    portal_id TEXT NOT NULL, generation INTEGER NOT NULL,
+    temporary_failures INTEGER NOT NULL DEFAULT 0, last_repair_at INTEGER, manual_run TEXT,
+    PRIMARY KEY (portal_id, generation)
+);
