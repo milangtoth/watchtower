@@ -24,18 +24,87 @@ pub struct Api {
     pub files: Arc<PathBuf>,
 }
 
+/// Static dashboard files compiled into the binary: path, content type, bytes.
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    (
+        "/dashboard.css",
+        "text/css; charset=utf-8",
+        include_bytes!("dashboard.css"),
+    ),
+    (
+        "/design/inter-latin.woff2",
+        "font/woff2",
+        include_bytes!("assets/design/inter-latin.woff2"),
+    ),
+    (
+        "/design/eb-garamond-latin.woff2",
+        "font/woff2",
+        include_bytes!("assets/design/eb-garamond-latin.woff2"),
+    ),
+    (
+        "/design/inter-OFL.txt",
+        "text/plain; charset=utf-8",
+        include_bytes!("assets/design/inter-OFL.txt"),
+    ),
+    (
+        "/design/eb-garamond-OFL.txt",
+        "text/plain; charset=utf-8",
+        include_bytes!("assets/design/eb-garamond-OFL.txt"),
+    ),
+    (
+        "/favicon.ico",
+        "image/x-icon",
+        include_bytes!("assets/favicon.ico"),
+    ),
+    (
+        "/favicon.svg",
+        "image/svg+xml",
+        include_bytes!("assets/favicon.svg"),
+    ),
+    (
+        "/favicon-16x16.png",
+        "image/png",
+        include_bytes!("assets/favicon-16x16.png"),
+    ),
+    (
+        "/favicon-32x32.png",
+        "image/png",
+        include_bytes!("assets/favicon-32x32.png"),
+    ),
+    (
+        "/apple-touch-icon.png",
+        "image/png",
+        include_bytes!("assets/apple-touch-icon.png"),
+    ),
+    (
+        "/icon-192.png",
+        "image/png",
+        include_bytes!("assets/icon-192.png"),
+    ),
+    (
+        "/icon-512.png",
+        "image/png",
+        include_bytes!("assets/icon-512.png"),
+    ),
+    (
+        "/site.webmanifest",
+        "application/manifest+json",
+        include_bytes!("assets/site.webmanifest"),
+    ),
+    (
+        "/robots.txt",
+        "text/plain; charset=utf-8",
+        include_bytes!("assets/robots.txt"),
+    ),
+];
+
 pub fn router(api: Api) -> Router {
-    Router::new()
-        .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
-        .route(
-            "/dashboard.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("dashboard.css"),
-                )
-            }),
-        )
+    let dashboard = get(|| async { Html(include_str!("dashboard.html")) });
+    let mut router = Router::new().route("/", dashboard);
+    for &(path, content_type, body) in ASSETS {
+        router = router.route(path, get(move || async move { asset(content_type, body) }));
+    }
+    router
         .route("/portals", get(list).post(register))
         .route("/portals/{id}", get(portal).delete(remove))
         .route("/portals/{id}/refresh", axum::routing::post(refresh))
@@ -45,6 +114,18 @@ pub fn router(api: Api) -> Router {
         .merge(crate::dashboard::routes())
         .merge(crate::voice::router())
         .with_state(api)
+}
+
+/// One static dashboard file, cached for an hour.
+fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 struct ApiError(StatusCode, String);

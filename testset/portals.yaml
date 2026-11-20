@@ -1,10 +1,92 @@
-# Our own test set. Goal: 4+ countries, 3+ portal software packages,
-# 5+ open tenders each with documents downloadable without login,
-# plus 1-2 portals blocked by login or captcha.
-#
-# - url: https://...
-#   country: DE
-#   software: ...
-#   kind: server-rendered | js-app | multi-step
-#   expect: serving | failed
-portals: []
+# Candidate inventory. A qualified positive case has five or more current tenders
+# with documents confirmed to download without credentials.
+portals:
+  - name: UK Legal Aid Agency
+    url: https://www.gov.uk/government/collections/tenders-for-legal-aid-contracts
+    country: GB
+    software: GOV.UK Publishing Platform
+    kind: server-rendered
+    expect: serving
+    readiness: attachment-verified
+    note: Latest verified read matched seven source entries and classified four as open.
+    evidence: ../docs/attachment-link-triage.md
+
+  - name: TenderNed
+    url: https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties?page=0&size=50&publicatieDatumPreset=AF30
+    public_page: https://www.tenderned.nl/aankondigingen/overzicht
+    country: NL
+    software: TenderNed
+    kind: js-app
+    expect: serving
+    readiness: five-public-downloads-verified
+    note: The listing UI uses this public JSON route. Five open tenders and PDF downloads verified. Watchtower attachment untested.
+    evidence: tenderned-baseline.json
+
+  - name: Deutsches Vergabeportal
+    url: https://dtvp.de/ausschreibungen/
+    country: DE
+    software: DTVP
+    kind: multi-step
+    expect: serving
+    readiness: five-public-downloads-verified
+    note: Five source downloads verified. Watchtower failed discovery after six calls because it could not verify a complete paginated listing.
+    evidence: dtvp-baseline.json
+
+  - name: Ireland eTenders
+    url: https://www.etenders.gov.ie/epps/quickSearchAction.do?T01_ps=50&latest=true&searchType=cftFTS
+    country: IE
+    software: European Dynamics ePPS
+    kind: multi-step
+    expect: serving
+    readiness: five-public-downloads-verified
+    note: Five source downloads verified through the public Proceed without association option. Watchtower attachment untested.
+    evidence: etenders-ie-baseline.json
+
+  - name: Catalonia PSCP
+    url: https://contractaciopublica.cat/portal-api/ultimes-publicacions?page=0&size=100&tipus=104
+    public_page: https://contractaciopublica.cat/ca/inici
+    country: ES
+    software: PSCP
+    kind: js-app
+    expect: serving
+    readiness: five-public-downloads-verified
+    note: The portal UI lists open notices using this JSON route. Five open tenders and administrative specifications verified. Watchtower attachment untested.
+    evidence: catalonia-pscp-baseline.json
+
+  - name: e-Zamówienia
+    url: https://www.ezamowienia.gov.pl/mp-client/search/list/
+    country: PL
+    software: e-Zamówienia
+    kind: js-app
+    expect: serving
+    readiness: needs-five-download-baseline
+    note: Initial HTML response contained no tender anchors.
+    evidence: https://ezamowienia.gov.pl/pl/
+
+  - name: eTendersNI search
+    url: https://etendersni.gov.uk/epps/prepareCurrentOpportunities.do?currentType=cft
+    country: GB
+    software: European Dynamics ePPS
+    kind: multi-step
+    expect: failed
+    readiness: blocked-verified
+    expected_blocker: CAPTCHA required by the search form
+
+  - name: BOAMP
+    url: https://www.boamp.fr/pages/recherche/?sort=dateparution
+    country: FR
+    software: BOAMP
+    kind: multi-step
+    expect: serving
+    readiness: needs-five-download-baseline
+    holdout: true
+    evidence: https://www.boamp.fr/pages/entreprise-accueil/
+
+  - name: Contracts Finder
+    url: https://www.contractsfinder.service.gov.uk/Search
+    country: GB
+    software: Contracts Finder
+    kind: multi-step
+    expect: serving
+    readiness: needs-five-download-baseline
+    holdout: true

@@ -1,5 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -122,9 +123,81 @@ pub struct PublishedTender {
 pub struct Evidence {
     pub pages: usize,
     pub entries: usize,
+    /// True once the reader found positive evidence that the listing ended. `end_of_list`
+    /// names it.
     pub terminal_page: bool,
+    /// `total` (the listing total matched the rows), `empty` (the listing showed its empty
+    /// state or a total of 0) or `last-page` (the next-page selector ran out).
+    pub end_of_list: &'static str,
+    pub total: Option<usize>,
+    pub empty_state: bool,
     pub document_count: usize,
+    /// Listing pages fetched, in order.
+    pub listing_pages: Vec<String>,
+    /// Pagination-looking links on listing pages that the recipe did not follow.
+    pub unfollowed_links: Vec<String>,
     pub samples: Vec<String>,
+    /// Every same-origin link on the HTML listing pages, compared with the last verified read.
+    #[serde(skip)]
+    pub listing_links: HashSet<String>,
+}
+
+/// The listing evidence kept from the last verified read, for comparison with the next one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredEvidence {
+    pub listing_pages: Vec<String>,
+    pub unfollowed_links: Vec<String>,
+}
+
+impl From<&Evidence> for StoredEvidence {
+    fn from(evidence: &Evidence) -> Self {
+        Self {
+            listing_pages: evidence.listing_pages.clone(),
+            unfollowed_links: evidence.unfollowed_links.clone(),
+        }
+    }
+}
+
+/// What changed between the published snapshot and a candidate read. The worker builds it and
+/// hands it to the model when a read needs an audit.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Review {
+    pub previous_open_count: usize,
+    /// Why this read needs an audit. Empty for a healthy repeat read.
+    pub signals: Vec<String>,
+    /// Previously open tenders that this read no longer lists.
+    pub vanished: Vec<TenderSummary>,
+    pub changes: Vec<FieldChange>,
+    pub moved_files: Vec<MovedFile>,
+    pub unfollowed_links: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenderSummary {
+    pub id: Option<String>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldChange {
+    pub tender: String,
+    pub field: &'static str,
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedFile {
+    pub file_name: String,
+    pub sha256: String,
+    pub from: Vec<String>,
+    pub to: String,
 }
 
 #[derive(Debug)]
@@ -138,14 +211,34 @@ pub enum ReadFailure {
     Blocked(String),
     Incomplete(String),
     Temporary(String),
+    /// A temporary failure where the portal said how long to wait, via `Retry-After`.
+    Throttled {
+        reason: String,
+        retry_after: std::time::Duration,
+    },
+}
+
+impl ReadFailure {
+    /// Whether retrying later may succeed without any change to the recipe.
+    pub fn is_temporary(&self) -> bool {
+        matches!(self, Self::Temporary(_) | Self::Throttled { .. })
+    }
+
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Throttled { retry_after, .. } => Some(*retry_after),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ReadFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Blocked(reason) | Self::Incomplete(reason) | Self::Temporary(reason) => {
-                f.write_str(reason)
-            }
+            Self::Blocked(reason)
+            | Self::Incomplete(reason)
+            | Self::Temporary(reason)
+            | Self::Throttled { reason, .. } => f.write_str(reason),
         }
     }
 }

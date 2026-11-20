@@ -108,8 +108,19 @@ FROM model_usage
 GROUP BY portal_id, model, operation
 ```
 
-Record a live attach and repair benchmark with the hand-in model before submission. Healthy repeat reads use zero model tokens.
+The live Luna demo attached and repaired a two-tender mock portal. Each row below includes the verification call for that operation. These are estimates from recorded usage at the standard token rates. [GPT-6 Luna pricing](https://developers.openai.com/api/docs/models/gpt-6-luna#pricing)
+
+| Operation | Calls | Uncached input tokens | Cached input tokens | Output tokens | Est. USD |
+|---|---:|---:|---:|---:|---:|
+| Attach and verify | 4 | 5,062 | 0 | 1,290 | $0.0011512 |
+| Repair and verify | 4 | 6,096 | 0 | 860 | $0.0010396 |
+
+Healthy repeat reads use the stored recipe without a model call. The cost to learn or repair a real portal varies with the evidence sampled and the number of attempts.
 
 ## Verify
 
 Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked`. The integration suite uses a local portal and a fake model to exercise paginated attachment, ZIP delivery, refresh deduplication, repair, access blocks, deletion, and restart recovery. Use `testset/portals.yaml` for real and held-out portal coverage.
+
+Use `python3 scripts/check_contract.py --portal-id PORTAL_ID` for read-only checks against the running container. The `--exercise URL` mode also checks registration, refresh deduplication, and deletion using a fresh fixture URL.
+
+To reproduce the live repair, [start the switchable mock](mock_portal/README.md) and run `python3 scripts/demo_repair.py` against a fresh fixture registration. The [55-second dashboard demo](docs/watchtower-demo.mp4) replays actual API snapshots from the verified Luna run.

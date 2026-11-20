@@ -146,10 +146,24 @@ impl PortalHttp {
                 return Err(ReadFailure::Incomplete("Portal returned HTTP 403".into()));
             }
             if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                return Err(ReadFailure::Temporary(format!(
-                    "Portal returned HTTP {}",
-                    status.as_u16()
-                )));
+                let reason = format!("Portal returned HTTP {}", status.as_u16());
+                return Err(
+                    match response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(retry_after)
+                    {
+                        Some(retry_after) => ReadFailure::Throttled {
+                            reason: format!(
+                                "{reason}; the portal asked to wait {}s",
+                                retry_after.as_secs()
+                            ),
+                            retry_after,
+                        },
+                        None => ReadFailure::Temporary(reason),
+                    },
+                );
             }
             if !status.is_success() {
                 return Err(ReadFailure::Incomplete(format!(
@@ -329,6 +343,17 @@ fn access_page(body: &str) -> Option<&'static str> {
     }
 }
 
+/// Reads a `Retry-After` value: delay seconds or an HTTP date. A date in the past means no wait.
+fn retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let seconds = (date.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
+    Some(Duration::from_secs(seconds.max(0) as u64))
+}
+
 fn transport_error(url: &Url, phase: &'static str, error: reqwest::Error) -> ReadFailure {
     let cause = transport_cause(&error);
     let host = url.host_str().unwrap_or("unknown host");
@@ -475,5 +500,18 @@ mod transport_tests {
             "{reason}"
         );
         assert!(!reason.contains("test-secret"));
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_or_an_http_date() {
+        assert_eq!(retry_after("120"), Some(Duration::from_secs(120)));
+        assert_eq!(
+            retry_after("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(Duration::ZERO)
+        );
+        let later = (chrono::Utc::now() + chrono::Duration::seconds(90)).to_rfc2822();
+        let wait = retry_after(&later).unwrap().as_secs();
+        assert!((85..=90).contains(&wait), "{wait}");
+        assert_eq!(retry_after("soon"), None);
     }
 }

@@ -9,6 +9,10 @@ testset
 __pycache__
 
 target
+node_modules
+storybook-static
+.storybook
+stories
 
 /src/dashboard/node_modules/
 /src/dashboard/elevenlabs-sdk.js
