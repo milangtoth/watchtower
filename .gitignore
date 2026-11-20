@@ -6,3 +6,7 @@ __pycache__/
 data/*
 !data/.gitkeep
 .pytest_cache/
+
+# Local Atlas exports and runtime data
+/tender-atlas-*.jsonl
+/Tender Atlas - source/Atlas library/
