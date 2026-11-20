@@ -422,8 +422,15 @@ function showSearch(payload) {
 
   const notes = [];
   if (total) notes.push(total > results.length ? "Showing " + results.length + " of " + total + " matches." : total + (total === 1 ? " match." : " matches."));
+  if (payload.tendersWithoutCpv) {
+    const skipped = payload.tendersWithoutCpv;
+    notes.push(skipped + (skipped === 1 ? " open tender has" : " open tenders have") + " no CPV codes, so the sector filter skipped "
+      + (skipped === 1 ? "it" : "them") + " (" + payload.portalsWithoutCpv.join(", ") + ").");
+  }
   if (unavailablePortals) notes.push("Tender data unavailable from " + unavailablePortals + (unavailablePortals === 1 ? " portal." : " portals."));
-  const voiceFilters = [filters.cpv && "CPV " + filters.cpv, filters.deadlineFrom && "closing from " + filters.deadlineFrom, filters.deadlineTo && "closing by " + filters.deadlineTo].filter(Boolean);
+  const sector = filters.cpv.length
+    && (filters.sector ? "sector " + filters.sector + " (CPV " + filters.cpv.join(", ") + ")" : "CPV " + filters.cpv.join(", "));
+  const voiceFilters = [sector, filters.deadlineFrom && "closing from " + filters.deadlineFrom, filters.deadlineTo && "closing by " + filters.deadlineTo].filter(Boolean);
   if (voiceFilters.length) notes.push("Filters: " + voiceFilters.join(", ") + ".");
   searchStatus.textContent = notes.join(" ");
 }
@@ -445,9 +452,13 @@ async function runSearch(input, callSignal) {
     const payload = await searchOpenTenders(input, signal);
     signal.throwIfAborted();
     showSearch(payload);
-    const { total, searchedPortals, unavailablePortals, portalsWithoutData, portals, countries, results } = payload;
+    const { total, searchedPortals, unavailablePortals, portalsWithoutData, portals, countries, results, filters, tendersWithoutCpv, portalsWithoutCpv } = payload;
     return {
       total,
+      sector: filters.sector || undefined,
+      cpvPrefixes: filters.cpv.length ? filters.cpv : undefined,
+      tendersWithoutCpv: filters.cpv.length ? tendersWithoutCpv : undefined,
+      portalsWithoutCpv: tendersWithoutCpv ? portalsWithoutCpv : undefined,
       searchedPortals,
       unavailablePortals,
       portalsWithoutData,
