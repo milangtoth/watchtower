@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watchtower</title>
+<script>
+  // Pick the theme before the stylesheet paints: saved choice, else the system setting.
+  (() => {
+    let theme = null;
+    try { theme = localStorage.getItem('watchtower-theme'); } catch {}
+    if (theme !== 'light' && theme !== 'dark') {
+      theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<link rel="stylesheet" href="/dashboard.css">
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 554 554" role="img" aria-label="Patterno" fill="currentColor">
+      <path d="M152 30A277 277 0 0 1 550 228C310 228 185 170 152 30Z"/>
+      <path d="M152 524A277 277 0 0 0 550 326C310 326 185 384 152 524Z"/>
+      <path d="M52 115C110 210 200 262 300 262H554V292H300C200 292 110 344 52 439A277 277 0 0 1 52 115Z"/>
+    </svg>
+    <h1>Watchtower</h1>
+  </div>
+  <div class="actions">
+    <button type="button" id="theme" class="icon-button" aria-label="Switch theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+      </svg>
+    </button>
+    <button type="button" class="lang" aria-label="Language: German (coming soon)" title="Language switching is coming soon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>
+      </svg>
+      <span>DE</span>
+    </button>
+    <button type="button" id="reload" class="cta" aria-label="Reload dashboard">Reload<span class="wide-only"> dashboard</span></button>
+  </div>
+</header>
+<p id="status" role="status">Loading portals…</p>
+<main id="portals"></main>
+<script>
+  const show = (parent, tag, text) => {
+    const node = document.createElement(tag);
+    node.textContent = text;
+    parent.append(node);
+    return node;
+  };
+  const get = async path => {
+    const response = await fetch(path, { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  };
+  const date = value => value ? new Date(value).toLocaleString() : '—';
+  const link = (parent, label, href) => {
+    const item = show(parent, 'a', label);
+    item.href = href;
+  };
+  const renderPortal = portal => {
+    const card = show(document.querySelector('#portals'), 'article', '');
+    card.dataset.state = portal.state;
+    show(card, 'h2', portal.url);
+    show(card, 'p', portal.state + ' · ' + portal.reason);
+    show(card, 'p', portal.tenderCount + ' open tenders · Last verified ' + date(portal.lastSuccessAt));
+    const base = '/portals/' + encodeURIComponent(portal.id);
+    const details = show(card, 'details', '');
+    show(details, 'summary', 'Runs and tenders');
+    details.addEventListener('toggle', async () => {
+      if (!details.open || details.dataset.loaded) return;
+      details.dataset.loaded = 'yes';
+      const content = show(details, 'section', '');
+      try {
+        const [runs, tenders] = await Promise.all([get(base + '/runs'), get(base + '/tenders')]);
+        show(content, 'h3', 'Recent runs');
+        const history = show(content, 'ul', '');
+        for (const run of runs.slice(-8).reverse()) {
+          show(history, 'li', run.kind + ' · ' + (run.result ?? 'running') + ' · ' + date(run.startedAt));
+        }
+        if (!runs.length) show(history, 'li', 'Waiting for first read');
+        show(content, 'h3', 'Tenders');
+        link(content, 'Open tender API response', base + '/tenders');
+        const records = show(content, 'ul', '');
+        for (const tender of tenders) {
+          const item = show(records, 'li', (tender.title ?? tender.id ?? 'Tender') + ' · ' + tender.status);
+          if (tender.documents.length) {
+            const files = show(item, 'ul', '');
+            for (const doc of tender.documents) {
+              if (/^\/files\/[a-f0-9]{64}$/.test(doc.path)) {
+                link(show(files, 'li', ''), doc.fileName, doc.path);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        content.remove();
+        delete details.dataset.loaded;
+        show(details, 'p', 'Could not load details (' + error.message + '). Reopen to retry.');
+      }
+    });
+  };
+  async function load() {
+    const status = document.querySelector('#status');
+    try {
+      const portals = await get('/portals');
+      document.querySelector('#portals').replaceChildren();
+      portals.forEach(renderPortal);
+      status.textContent = portals.length ? portals.length + ' registered portals' : 'No portals registered';
+    } catch (error) {
+      status.textContent = 'Could not load portals (' + error.message + ')';
+    }
+  }
+  document.querySelector('#reload').addEventListener('click', load);
+
+  // Light / dark toggle. A click saves the choice; until then the page follows the system.
+  const themeButton = document.querySelector('#theme');
+  const applyTheme = theme => {
+    document.documentElement.dataset.theme = theme;
+    themeButton.setAttribute('aria-label', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+  };
+  applyTheme(document.documentElement.dataset.theme);
+  themeButton.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem('watchtower-theme', next); } catch {}
+  });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+    let saved = null;
+    try { saved = localStorage.getItem('watchtower-theme'); } catch {}
+    if (!saved) applyTheme(event.matches ? 'dark' : 'light');
+  });
+
+  load();
+</script>
+</html>
