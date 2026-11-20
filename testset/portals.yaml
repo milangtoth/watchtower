@@ -1,10 +1,45 @@
-# Our own test set. Goal: 4+ countries, 3+ portal software packages,
-# 5+ open tenders each with documents downloadable without login,
-# plus 1-2 portals blocked by login or captcha.
-#
-# - url: https://...
-#   country: DE
-#   software: ...
-#   kind: server-rendered | js-app | multi-step
-#   expect: serving | failed
-portals: []
+# Reference snapshot from 2026-11-20. Pass only the url to Watchtower.
+portals:
+  - url: https://www.etenders.gov.ie/epps/prepareCurrentOpportunities.do?currentType=cft
+    country: IE
+    software: European Dynamics ePPS
+    kind: multi-step
+    split: development
+    expect: serving
+    samples: IE.json
+  - url: https://zakazky.muni.cz/contract_index.html
+    country: CZ
+    software: E-ZAK
+    kind: server-rendered
+    split: development
+    expect: serving
+    samples: CZ.json
+  - url: https://www.tenderned.nl/aankondigingen/overzicht
+    country: NL
+    software: TenderNed
+    kind: js-app
+    split: development
+    expect: serving
+    samples: NL.json
+  - url: https://www.etenders.gov.mt/epps/prepareCurrentOpportunities.do?currentType=cft
+    country: MT
+    software: European Dynamics ePPS
+    kind: multi-step
+    split: holdout
+    expect: serving
+    samples: MT.json
+  - url: https://platformazakupowa.pl/pn/wszz_torun/proceedings
+    country: PL
+    software: Open Nexus platformazakupowa.pl
+    kind: server-rendered
+    split: holdout
+    expect: serving
+    samples: PL.json
+  - url: https://in-tendhost.co.uk/centralbedfordshire/aspx/Tenders/Current
+    country: GB
+    software: In-tend
+    kind: multi-step
+    split: development
+    expect: failed
+    reason: Registration and an expression of interest are required for document access.
+    evidence: https://www.centralbedfordshire.gov.uk/business/procurement-and-tender-opportunities
