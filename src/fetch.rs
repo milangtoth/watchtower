@@ -41,6 +41,15 @@ pub struct Page {
     pub body: String,
 }
 
+/// A page read while probing: the body plus the status and content type that describe it.
+#[derive(Debug)]
+pub(crate) struct Sample {
+    pub url: Url,
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub body: String,
+}
+
 #[derive(Debug)]
 pub(crate) enum DocumentResponse {
     Files(Vec<Document>),
@@ -182,6 +191,24 @@ impl PortalHttp {
 
     pub async fn page(&self, url: Url) -> Result<Page, ReadFailure> {
         Self::read_page(self.request(url, "page headers").await?, "page body").await
+    }
+
+    /// Reads a page like `page`, keeping the status and content type for probing.
+    pub(crate) async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
+        let response = self.request(url, "probe headers").await?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let page = Self::read_page(response, "probe body").await?;
+        Ok(Sample {
+            url: page.url,
+            status,
+            content_type,
+            body: page.body,
+        })
     }
 
     pub(crate) async fn page_unless_seen(
