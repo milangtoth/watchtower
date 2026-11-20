@@ -1,6 +1,9 @@
 use crate::{
     db::{Job, Store},
-    domain::{CandidateRead, ModelOperation, ModelUsage, ReadFailure, Review},
+    domain::{
+        CandidateRead, ConnectionCandidate, ConnectionDecision, ModelOperation, ModelUsage,
+        ReadFailure, Review,
+    },
     fetch::{Page, PortalHttp, public_http},
     recipe::{PageSample, Recipe, sample, sample_page},
 };
@@ -31,6 +34,43 @@ pub trait PortalModel: Send + Sync {
         candidate: &CandidateRead,
         review: &Review,
     ) -> Result<(), ReadFailure>;
+
+    /// Picks the connection method to learn a recipe for, from candidates in ranked order, and
+    /// explains why. The rest become fallbacks for repair. `attempt` is 1 on the first attach.
+    ///
+    /// Placeholder (the real decision is owned by qwas): takes the top-ranked candidate without
+    /// a model call. Test models can rely on it.
+    async fn decide(
+        &self,
+        context: &ReasoningContext<'_>,
+        ranked: Vec<ConnectionCandidate>,
+    ) -> Result<ConnectionDecision, ReadFailure> {
+        let _ = context;
+        top_ranked(ranked, 1)
+    }
+}
+
+/// A decision for the first of `ranked`, with the rest as alternatives and no model involved.
+pub fn top_ranked(
+    ranked: Vec<ConnectionCandidate>,
+    attempt: u32,
+) -> Result<ConnectionDecision, ReadFailure> {
+    let mut candidates = ranked.into_iter();
+    let chosen = candidates.next().ok_or_else(|| {
+        ReadFailure::Incomplete("Probing found no usable way to read this portal".into())
+    })?;
+    Ok(ConnectionDecision {
+        rationale: format!(
+            "Highest-ranked candidate: {} at {}",
+            chosen.method.label(),
+            chosen.entry_url
+        ),
+        chosen,
+        alternatives: candidates.collect(),
+        model: "none (top-ranked)".into(),
+        decided_at: chrono::Utc::now().to_rfc3339(),
+        attempt,
+    })
 }
 
 pub struct OpenAi {
