@@ -142,6 +142,69 @@ pub struct Evidence {
     pub listing_links: HashSet<String>,
 }
 
+/// How Watchtower reads a portal. Probing finds candidates, ranking orders them, and the model
+/// decides which one a recipe is learned for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionMethod {
+    Html,
+    Json,
+    Ocds,
+    Feed,
+    Sitemap,
+    Ted,
+}
+
+impl ConnectionMethod {
+    /// The name used in reasons shown to an operator.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Html => "HTML",
+            Self::Json => "JSON",
+            Self::Ocds => "OCDS",
+            Self::Feed => "Feed",
+            Self::Sitemap => "Sitemap",
+            Self::Ted => "TED",
+        }
+    }
+}
+
+/// One way to read a portal, found by probing without the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionCandidate {
+    pub method: ConnectionMethod,
+    /// URL the recipe would start from.
+    pub entry_url: String,
+    /// Where the candidate was found, such as "link rel=alternate", "robots.txt" or "start page".
+    pub found_via: String,
+    pub http_status: u16,
+    pub content_type: Option<String>,
+    /// Rows or entries parsed from one sample.
+    pub sample_items: usize,
+    /// Tender fields seen in the sample, such as "title", "deadline", "buyer" or "documents".
+    pub fields_seen: Vec<String>,
+    pub has_pagination: bool,
+    /// Ranker output between 0 and 1.
+    pub score: f32,
+}
+
+/// The connection method chosen for a portal, stored per attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionDecision {
+    pub chosen: ConnectionCandidate,
+    /// Remaining candidates in ranked order, used as fallbacks during repair.
+    pub alternatives: Vec<ConnectionCandidate>,
+    /// The model's reason, shown on the dashboard.
+    pub rationale: String,
+    pub model: String,
+    /// RFC 3339.
+    pub decided_at: String,
+    /// 1 for the first attach, 2 or more after a failed repair re-decided the method.
+    pub attempt: u32,
+}
+
 /// The listing evidence kept from the last verified read, for comparison with the next one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

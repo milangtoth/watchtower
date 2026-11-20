@@ -1,6 +1,7 @@
 pub mod api;
 mod dashboard;
 pub mod db;
+pub mod discovery;
 pub mod domain;
 pub mod fetch;
 mod metadata;
