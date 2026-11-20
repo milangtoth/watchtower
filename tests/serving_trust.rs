@@ -64,7 +64,7 @@ async fn tender_the_portal_stops_listing_is_closed() {
 }
 
 #[tokio::test]
-async fn tender_count_holds_every_tender_including_closed_ones() {
+async fn tender_count_holds_every_tender_and_the_dashboard_shows_the_open_ones() {
     let h = Harness::attach(Layout::two_pages(), html_recipe(), "/").await;
     h.change(|layout| {
         layout.pages = vec![vec![alpha()]];
@@ -82,6 +82,14 @@ async fn tender_count_holds_every_tender_including_closed_ones() {
         h.portal().await["tenderCount"],
         2,
         "tenderCount equals GET /tenders"
+    );
+    let (status, page) = call(&h.app, "GET", "/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let page = String::from_utf8(page).unwrap();
+    assert!(page.contains("' tenders held'") && page.contains("tender.status === 'open'"));
+    assert!(
+        !page.contains("open tenders"),
+        "the dashboard no longer calls every tender open"
     );
     h.shutdown().await;
 }
