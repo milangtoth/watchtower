@@ -1,10 +1,10 @@
 use crate::{
     domain::{
-        CandidateRead, Document, Evidence, Nature, Place, Procedure, ReadFailure, Tender,
-        TenderStatus,
+        CandidateRead, ConnectionCandidate, ConnectionMethod, Document, Evidence, Nature, Place,
+        Procedure, ReadFailure, Tender, TenderStatus,
     },
     fetch::{DocumentResponse, Page, PortalHttp, public_http},
-    metadata,
+    formats, metadata,
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
@@ -15,12 +15,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
     Html,
     Json,
+    /// RSS or Atom: each entry is a row with its title and link.
+    Feed,
+    /// XML sitemap or sitemap index: each URL is a tender detail page.
+    Sitemap,
 }
+
+/// A listing structure read with fixed rules instead of model-written selectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Preset {
+    /// OCDS release or record packages, with `links.next` pagination.
+    Ocds,
+}
+
+/// More URLs than this in a sitemap would take too long to read at one request per second.
+const SITEMAP_PAGE_LIMIT: usize = 500;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,7 +49,9 @@ pub struct Select {
 pub struct Recipe {
     pub start_url: Option<String>,
     pub listing: Format,
-    #[serde(deserialize_with = "row_path")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<Preset>,
+    #[serde(default, deserialize_with = "row_path")]
     pub items: String,
     pub next: Option<Select>,
     pub total: Option<Select>,
@@ -53,6 +70,10 @@ pub struct Recipe {
     pub timezone: Option<String>,
     pub date_format: Option<String>,
     pub deadline_format: Option<String>,
+    /// Feed and sitemap only: keep entry URLs matching this pattern, where `*` matches any run
+    /// of characters. A pattern without `*` matches URLs that contain it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_pattern: Option<String>,
 }
 
 /// Reads `items` as a plain path. Models sometimes write it like the other selections, as
@@ -104,7 +125,72 @@ const FIELDS: &[&str] = &[
 ];
 
 impl Recipe {
+    /// The recipe for a connection method that needs no model-written rules, if any. OCDS maps
+    /// its fields directly and starts at the candidate's entry URL.
+    pub fn preset(candidate: &ConnectionCandidate) -> Option<Self> {
+        (candidate.method == ConnectionMethod::Ocds).then(|| {
+            serde_json::from_value(serde_json::json!({
+                "start_url": candidate.entry_url, "listing": "json", "preset": "ocds"
+            }))
+            .expect("the OCDS preset recipe is valid")
+        })
+    }
+
+    /// The format of detail pages. Feeds and sitemaps link to HTML pages unless set otherwise.
+    pub fn page_format(&self) -> Format {
+        self.detail_format.unwrap_or(match self.listing {
+            Format::Feed | Format::Sitemap => Format::Html,
+            format => format,
+        })
+    }
+
+    /// Whether rows come from a feed or sitemap, which supplies the detail URL itself.
+    fn entry_listing(&self) -> bool {
+        matches!(self.listing, Format::Feed | Format::Sitemap)
+    }
+
+    /// Feed entries open their detail page only when the recipe reads something from it.
+    fn feed_details(&self) -> bool {
+        !self.detail_fields.is_empty()
+            || self.direct_documents.is_some()
+            || self.document_page.is_some()
+            || self.documents.is_some()
+    }
+
+    fn matches_pattern(&self, url: &Url) -> bool {
+        self.url_pattern
+            .as_deref()
+            .is_none_or(|pattern| glob(pattern, url.as_str()))
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(Preset::Ocds) = self.preset {
+            ensure!(
+                self.listing == Format::Json,
+                "the OCDS preset reads JSON listings"
+            );
+            return Ok(());
+        }
+        for (name, format) in [
+            ("detail_format", self.detail_format),
+            ("document_format", self.document_format),
+        ] {
+            ensure!(
+                !matches!(format, Some(Format::Feed | Format::Sitemap)),
+                "{name} must be html or json"
+            );
+        }
+        if self.entry_listing() {
+            ensure!(
+                self.list_fields.is_empty(),
+                "feed and sitemap entries supply url and title; use detail_fields for the rest"
+            );
+        } else {
+            ensure!(
+                self.url_pattern.is_none(),
+                "url_pattern applies to feed and sitemap listings"
+            );
+        }
         if matches!(self.listing, Format::Html) {
             ensure!(
                 !self.items.trim().is_empty(),
@@ -112,7 +198,7 @@ impl Recipe {
             );
         }
         validate_path(self.listing, &self.items).context("items")?;
-        let detail_format = self.detail_format.unwrap_or(self.listing);
+        let detail_format = self.page_format();
         for (name, format, fields) in [
             ("list_fields", self.listing, &self.list_fields),
             ("detail_fields", detail_format, &self.detail_fields),
@@ -135,7 +221,7 @@ impl Recipe {
                 validate_path(self.listing, &rule.path).with_context(|| name)?;
             }
         }
-        let tender_format = if self.detail_link.is_some() {
+        let tender_format = if self.detail_link.is_some() || self.entry_listing() {
             detail_format
         } else {
             self.listing
@@ -166,7 +252,7 @@ impl Recipe {
             ensure!(timezone.parse::<Tz>().is_ok(), "invalid IANA timezone");
         }
         ensure!(
-            self.detail_fields.is_empty() || self.detail_link.is_some(),
+            self.detail_fields.is_empty() || self.detail_link.is_some() || self.entry_listing(),
             "detail fields need a detail link"
         );
         ensure!(
@@ -208,6 +294,9 @@ impl Source {
             Format::Json => Ok(Self::Json(
                 serde_json::from_str(body).context("expected a JSON response")?,
             )),
+            Format::Feed | Format::Sitemap => {
+                anyhow::bail!("feed and sitemap pages are read by their own parser")
+            }
         }
     }
 
@@ -318,6 +407,8 @@ struct ListingPage {
     /// The page shows the recipe's empty state or a total of 0.
     empty_state: bool,
     links: ListingLinks,
+    /// Further listing pages to read, such as the child sitemaps of a sitemap index.
+    more: Vec<Url>,
 }
 
 #[derive(Default)]
@@ -341,7 +432,7 @@ pub async fn read(
         Some(start) => resolve(portal_url, start).map_err(incomplete)?,
         None => portal_url.clone(),
     };
-    let mut next = Some(start);
+    let mut queue = VecDeque::from([start]);
     let mut seen_pages = HashSet::new();
     let mut listing_pages = Vec::new();
     let mut fetched = HashSet::new();
@@ -351,7 +442,7 @@ pub async fn read(
     let mut samples = Vec::new();
     let mut total = None;
     let mut empty_state = false;
-    while let Some(mut url) = next.take() {
+    while let Some(mut url) = queue.pop_front() {
         url.set_fragment(None);
         if seen_pages.len() >= 250 || !seen_pages.insert(url.clone()) {
             return Err(ReadFailure::Incomplete(
@@ -378,7 +469,22 @@ pub async fn read(
         listing_links.extend(listing.links.all);
         pagination_links.extend(listing.links.pagination);
         listing_rows.extend(listing.rows);
-        next = listing.next;
+        queue.extend(listing.next);
+        queue.extend(listing.more);
+    }
+    if recipe.listing == Format::Sitemap {
+        let mut details = HashSet::new();
+        listing_rows.retain(|row| {
+            row.detail
+                .as_ref()
+                .is_none_or(|url| details.insert(url.clone()))
+        });
+        if listing_rows.len() > SITEMAP_PAGE_LIMIT {
+            return Err(ReadFailure::Incomplete(format!(
+                "The sitemap lists {} matching pages, more than {SITEMAP_PAGE_LIMIT}; narrow url_pattern to tender pages",
+                listing_rows.len()
+            )));
+        }
     }
     if total.is_some_and(|count| count != listing_rows.len()) {
         return Err(ReadFailure::Incomplete(
@@ -461,6 +567,14 @@ pub async fn read(
 }
 
 fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
+    if recipe.preset == Some(Preset::Ocds) {
+        return ocds_listing(page);
+    }
+    match recipe.listing {
+        Format::Feed => return feed_listing(page, recipe),
+        Format::Sitemap => return sitemap_listing(page, recipe),
+        Format::Html | Format::Json => {}
+    }
     let source = Source::parse(recipe.listing, &page.body)?;
     let root = source.root();
     let next = resolve_one(&root, recipe.next.as_ref(), &page.url)?;
@@ -511,26 +625,194 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         total,
         empty_state: empty || total == Some(0),
         links: listing_links(&source, &page.url),
+        more: Vec::new(),
     })
 }
 
-/// Reads a listing total. Accepts a plain count or one grouped in thousands, such as `1.234`
-/// or `1 234`. Anything else, such as `57 results`, is rejected so that a changed total cannot
-/// silently disappear.
+fn feed_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
+    let feed = formats::feed(&page.body)?;
+    let next = feed
+        .next
+        .as_deref()
+        .map(|next| resolve(&page.url, next))
+        .transpose()?;
+    let empty_state = feed.entries.is_empty() && next.is_none();
+    let mut rows = Vec::with_capacity(feed.entries.len());
+    for entry in feed.entries {
+        let mut fields = Fields::new();
+        let mut detail = None;
+        if let Some(link) = entry.link {
+            let link = resolve(&page.url, &link)?;
+            if !recipe.matches_pattern(&link) {
+                continue;
+            }
+            fields.insert("url".into(), vec![link.to_string()]);
+            detail = recipe.feed_details().then_some(link);
+        }
+        if let Some(title) = entry.title {
+            fields.insert("title".into(), vec![title]);
+        }
+        rows.push(ListingRow {
+            fields,
+            detail,
+            attachments: Attachments::default(),
+        });
+    }
+    Ok(ListingPage {
+        rows,
+        next,
+        total: None,
+        empty_state,
+        links: ListingLinks::default(),
+        more: Vec::new(),
+    })
+}
+
+fn sitemap_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
+    let map = formats::sitemap(&page.body)?;
+    let mut rows = Vec::new();
+    for location in map.urls {
+        let url = resolve(&page.url, &location)?;
+        if !recipe.matches_pattern(&url) {
+            continue;
+        }
+        rows.push(ListingRow {
+            fields: Fields::from([("url".into(), vec![url.to_string()])]),
+            detail: Some(url),
+            attachments: Attachments::default(),
+        });
+    }
+    let more = map
+        .sitemaps
+        .iter()
+        .map(|location| resolve(&page.url, location))
+        .collect::<Result<_>>()?;
+    Ok(ListingPage {
+        rows,
+        next: None,
+        total: None,
+        empty_state: false,
+        links: ListingLinks::default(),
+        more,
+    })
+}
+
+fn ocds_listing(page: &Page) -> Result<ListingPage> {
+    let package: Value = serde_json::from_str(&page.body).context("expected a JSON response")?;
+    let parsed = formats::ocds(&package)?;
+    let next = parsed
+        .next
+        .as_deref()
+        .map(|next| resolve(&page.url, next))
+        .transpose()?;
+    let rows = parsed
+        .tenders
+        .into_iter()
+        .map(|tender| {
+            let mut fields = tender.fields;
+            resolve_field_url(&mut fields, &page.url);
+            let files = tender
+                .documents
+                .iter()
+                .filter_map(|document| resolve(&page.url, document).ok())
+                .collect();
+            ListingRow {
+                fields,
+                detail: None,
+                attachments: Attachments {
+                    files,
+                    ..Attachments::default()
+                },
+            }
+        })
+        .collect();
+    Ok(ListingPage {
+        rows,
+        next,
+        total: None,
+        empty_state: false,
+        links: ListingLinks::default(),
+        more: Vec::new(),
+    })
+}
+
+/// Matches `text` against a pattern where `*` stands for any run of characters. A pattern
+/// without `*` matches text that contains it.
+fn glob(pattern: &str, text: &str) -> bool {
+    if !pattern.contains('*') {
+        return text.contains(pattern);
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !text.starts_with(first) || text.len() < first.len() + last.len() || !text.ends_with(last) {
+        return false;
+    }
+    let mut rest = &text[first.len()..text.len() - last.len()];
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(index) => rest = &rest[index + part.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Reads a listing total: a plain count, one grouped in thousands such as `1.234` or `1 234`,
+/// or such a count at the start of a phrase, as in "8 aanbestedingen gevonden" or
+/// "1.234 results". Text without a clear leading count, such as "Page 1 of 2" or "1–20 of 57",
+/// is rejected so that a changed total cannot silently become a wrong one.
 fn parse_total(text: &str) -> Option<usize> {
     let text = text.trim();
-    if let Ok(count) = text.parse() {
+    let (count, rest) = leading_count(text)?;
+    if rest.is_empty() {
         return Some(count);
     }
-    let groups: Vec<&str> = text
-        .split(['.', ',', ' ', '\u{a0}', '\u{202f}', '\''])
-        .collect();
-    let digits = |group: &str| !group.is_empty() && group.bytes().all(|ch| ch.is_ascii_digit());
-    let grouped = groups.len() > 1
-        && groups[0].len() <= 3
-        && groups.iter().all(|group| digits(group))
-        && groups[1..].iter().all(|group| group.len() == 3);
-    grouped.then(|| groups.concat().parse().ok()).flatten()
+    // A phrase must continue with a space and a word, not with "of 2" or "–20".
+    let mut words = rest.split_whitespace();
+    let first = words.next()?;
+    let separated = rest.starts_with(char::is_whitespace);
+    let word = first.chars().next().is_some_and(char::is_alphabetic);
+    let range = [
+        "of", "van", "von", "de", "du", "sur", "di", "z", "av", "af", "från", "od",
+    ]
+    .contains(&first.to_lowercase().as_str());
+    (separated && word && !range).then_some(count)
+}
+
+/// The longest count at the start of `text`, in plain digits or grouped in thousands, with the
+/// remaining text.
+fn leading_count(text: &str) -> Option<(usize, &str)> {
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let first = digits(text);
+    if first == 0 {
+        return None;
+    }
+    let mut end = first;
+    if first <= 3 {
+        loop {
+            let rest = &text[end..];
+            let Some(separator) = rest
+                .chars()
+                .next()
+                .filter(|ch| matches!(ch, '.' | ',' | ' ' | '\u{a0}' | '\u{202f}' | '\''))
+            else {
+                break;
+            };
+            let group = &rest[separator.len_utf8()..];
+            if digits(group) == 3 && !group[3..].starts_with(|ch: char| ch.is_ascii_digit()) {
+                end += separator.len_utf8() + 3;
+            } else {
+                break;
+            }
+        }
+    }
+    let count = text[..end]
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((count, &text[end..]))
 }
 
 fn without_fragment(url: &Url) -> String {
@@ -584,7 +866,7 @@ fn pagination_link(anchor: ElementRef<'_>) -> bool {
 /// when the recipe selects documents but its selectors match nothing on an HTML detail page,
 /// the HTML fallback reads that page's main content instead.
 fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
-    let format = recipe.detail_format.unwrap_or(recipe.listing);
+    let format = recipe.page_format();
     let source = Source::parse(format, &page.body)?;
     let root = source.root();
     let mut fields = extract(&root, &recipe.detail_fields);
@@ -1112,8 +1394,86 @@ fn json_strings(value: &Value) -> Vec<&str> {
     strings
 }
 
+/// Words portals print where a value is missing. A missing value is published as missing.
+const NOT_STATED: &[&str] = &[
+    "-",
+    "–",
+    "—",
+    "n/a",
+    "n.v.t.",
+    "none",
+    "unknown",
+    "not stated",
+    "not specified",
+    "not known",
+    "niet vermeld",
+    "niet bekend",
+    "onbekend",
+    "nicht angegeben",
+    "keine angabe",
+    "unbekannt",
+    "non précisé",
+    "non renseigné",
+    "non communiqué",
+    "inconnu",
+    "no especificado",
+    "no consta",
+    "desconocido",
+    "non specificato",
+    "nie podano",
+    "brak",
+];
+
+fn stated(value: String) -> Option<String> {
+    let normalized = value.trim().trim_end_matches('.').to_lowercase();
+    (!NOT_STATED.contains(&normalized.as_str())).then_some(value)
+}
+
+/// Maps a procedure name in the portal's language to the appendix values. "Not open" forms are
+/// checked before "open", and Polish "nieograniczony" (unlimited) means open.
+fn procedure(value: &str) -> Procedure {
+    let value = value.to_lowercase();
+    let has = |terms: &[&str]| terms.iter().any(|term| value.contains(term));
+    if has(&["nieograniczony"]) {
+        Procedure::Open
+    } else if has(&[
+        "niet-openbaar",
+        "niet openbaar",
+        "nichtoffen",
+        "nicht offen",
+        "nicht-offen",
+        "restricted",
+        "restreint",
+        "restringido",
+        "ristretta",
+        "ograniczony",
+    ]) {
+        Procedure::Restricted
+    } else if has(&[
+        "negotiat",
+        "verhandlung",
+        "négoci",
+        "negoci",
+        "onderhandel",
+        "negoziat",
+        "negocjac",
+    ]) {
+        Procedure::Negotiated
+    } else if has(&["open", "offen", "ouvert", "abierto", "aperta"]) {
+        Procedure::Open
+    } else {
+        Procedure::Other
+    }
+}
+
 fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
-    let get = |key: &str| fields.get(key).and_then(|values| values.first()).cloned();
+    let get = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|values| values.first())
+            .cloned()
+            .and_then(stated)
+    };
     let status = get("status").unwrap_or_default().to_lowercase();
     let status = match status.as_str() {
         "withdrawn" | "cancelled" | "canceled" | "annulé" | "annulée" | "aufgehoben"
@@ -1173,14 +1533,7 @@ fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
         documents: Vec::new(),
         reference_number: get("referenceNumber"),
         description: get("description"),
-        procedure_type: get("procedureType").map(|value| match value.to_lowercase().as_str() {
-            "open" | "ouvert" | "offen" | "abierto" | "openbaar" => Procedure::Open,
-            "restricted" | "restreint" | "nichtoffen" | "restringido" => Procedure::Restricted,
-            "negotiated" | "négocié" | "verhandlungsverfahren" | "negociado" => {
-                Procedure::Negotiated
-            }
-            _ => Procedure::Other,
-        }),
+        procedure_type: get("procedureType").map(|value| procedure(&value)),
         contract_nature: get("contractNature").and_then(|value| {
             match value.to_lowercase().as_str() {
                 "works" | "travaux" | "bauleistungen" | "obras" | "werken" => Some(Nature::Works),
@@ -1326,12 +1679,28 @@ mod sample_tests {
     }
 
     #[test]
-    fn totals_parse_plain_or_grouped_counts_only() {
+    fn totals_parse_a_clear_leading_count_only() {
         assert_eq!(parse_total("57"), Some(57));
         assert_eq!(parse_total(" 1.234 "), Some(1234));
         assert_eq!(parse_total("1,234,567"), Some(1_234_567));
         assert_eq!(parse_total("1\u{a0}234"), Some(1234));
-        for text in ["57 results", "1–20 of 57", "12.5", "1.23", ""] {
+        assert_eq!(
+            parse_total("8 aanbestedingen gevonden. Pagina 1 van 2."),
+            Some(8)
+        );
+        assert_eq!(parse_total("1.234 results"), Some(1234));
+        assert_eq!(parse_total("1 234 Ausschreibungen"), Some(1234));
+        assert_eq!(parse_total("57 results"), Some(57));
+        for text in [
+            "Page 1 of 2",
+            "1–20 of 57",
+            "1 of 2",
+            "Pagina 1 van 2",
+            "12.5",
+            "1.23",
+            "57results",
+            "",
+        ] {
             assert_eq!(parse_total(text), None, "{text:?}");
         }
     }
@@ -1360,5 +1729,33 @@ mod sample_tests {
         assert!(links.all.contains("https://portal.example/help"));
         assert!(links.all.contains("https://portal.example/tender/1"));
         assert!(!links.all.iter().any(|link| link.contains("elsewhere")));
+    }
+
+    #[test]
+    fn procedures_map_by_keyword_and_placeholders_count_as_missing() {
+        for (text, expected) in [
+            ("Openbaar", Procedure::Open),
+            ("Niet-openbaar", Procedure::Restricted),
+            ("Offenes Verfahren", Procedure::Open),
+            ("Nicht offenes Verfahren", Procedure::Restricted),
+            ("Verhandlungsverfahren", Procedure::Negotiated),
+            ("Procédure ouverte", Procedure::Open),
+            (
+                "Procédure concurrentielle avec négociation",
+                Procedure::Negotiated,
+            ),
+            ("Przetarg nieograniczony", Procedure::Open),
+            ("Przetarg ograniczony", Procedure::Restricted),
+            ("Dynamic purchasing system", Procedure::Other),
+        ] {
+            assert_eq!(procedure(text), expected, "{text}");
+        }
+        assert_eq!(stated("Niet vermeld".into()), None);
+        assert_eq!(stated(" Not specified. ".into()), None);
+        assert_eq!(stated("—".into()), None);
+        assert_eq!(
+            stated("Stichting Openbaar Onderwijs".into()).as_deref(),
+            Some("Stichting Openbaar Onderwijs")
+        );
     }
 }

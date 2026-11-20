@@ -190,7 +190,7 @@ async fn malformed_total_does_not_hide_a_pagination_break() {
     let h = Harness::attach(Layout::two_pages(), html_recipe(), "/").await;
     let before = h.tenders().await;
     h.change(|layout| {
-        layout.total = Some("2 results".into());
+        layout.total = Some("Page 1 of 2".into());
         layout.next_class = "pager-next";
     })
     .await;

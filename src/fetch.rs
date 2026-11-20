@@ -18,6 +18,8 @@ use tokio::{
 };
 
 const PAGE_LIMIT: usize = 8 * 1024 * 1024;
+/// The sitemap protocol allows 50 MB per uncompressed file.
+const UNPACKED_PAGE_LIMIT: usize = 64 * 1024 * 1024;
 const FILE_LIMIT: u64 = 250 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 
@@ -293,7 +295,26 @@ async fn read_text(mut response: Response, phase: &'static str) -> Result<String
         }
         data.extend_from_slice(&chunk);
     }
+    if data.starts_with(&[0x1f, 0x8b]) {
+        data = gunzip(&data)?;
+    }
     Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// Unpacks a gzip body such as a compressed sitemap. Unpacked pages may be larger than the
+/// download limit, up to `UNPACKED_PAGE_LIMIT`.
+fn gunzip(data: &[u8]) -> Result<Vec<u8>, ReadFailure> {
+    let mut unpacked = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .take(UNPACKED_PAGE_LIMIT as u64 + 1)
+        .read_to_end(&mut unpacked)
+        .map_err(|_| ReadFailure::Incomplete("A compressed page could not be unpacked".into()))?;
+    if unpacked.len() > UNPACKED_PAGE_LIMIT {
+        return Err(ReadFailure::Incomplete(
+            "A compressed page exceeds the unpacked size limit".into(),
+        ));
+    }
+    Ok(unpacked)
 }
 
 fn filename(response: &Response) -> String {

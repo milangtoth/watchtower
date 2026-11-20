@@ -1,6 +1,6 @@
 use crate::domain::{
-    CandidateRead, ModelOperation, ModelUsage, Portal, PublishedTender, Run, StoredEvidence,
-    TenderStatus,
+    CandidateRead, ConnectionDecision, ModelOperation, ModelUsage, Portal, PublishedTender, Run,
+    StoredEvidence, TenderStatus,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -163,6 +163,7 @@ impl Store {
                 "model_usage",
                 "read_evidence",
                 "portal_retry",
+                "connection_decisions",
             ] {
                 sqlx::query(&format!(
                     "DELETE FROM {table} WHERE portal_id = ? AND generation = ?"
@@ -519,6 +520,41 @@ impl Store {
         Ok(())
     }
 
+    /// Deletes the stored decisions of the job's portal generation, before a fresh attach.
+    pub async fn clear_decisions(&self, job: &Job) -> Result<()> {
+        sqlx::query("DELETE FROM connection_decisions WHERE portal_id = ? AND generation = ?")
+            .bind(&job.portal_id)
+            .bind(job.generation)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
+    /// Stores a connection decision under its attempt number for the job's portal generation.
+    /// Nothing is stored for a portal that was removed meanwhile.
+    pub async fn record_decision(&self, job: &Job, decision: &ConnectionDecision) -> Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO connection_decisions(portal_id, generation, attempt, payload) SELECT id, generation, ?, ? FROM portals WHERE id = ? AND generation = ? AND deleted = 0")
+            .bind(i64::from(decision.attempt))
+            .bind(serde_json::to_string(decision)?)
+            .bind(&job.portal_id)
+            .bind(job.generation)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
+    /// The decision with the highest attempt for the portal's current generation. `None` when the
+    /// portal is unknown or no decision was stored yet.
+    pub async fn latest_decision(&self, portal_id: &str) -> Result<Option<ConnectionDecision>> {
+        let payload: Option<String> = sqlx::query_scalar("SELECT d.payload FROM connection_decisions d JOIN portals p ON p.id = d.portal_id AND p.generation = d.generation WHERE p.id = ? AND p.deleted = 0 ORDER BY d.attempt DESC LIMIT 1")
+            .bind(portal_id)
+            .fetch_optional(&self.0)
+            .await?;
+        Ok(payload
+            .map(|payload| serde_json::from_str(&payload))
+            .transpose()?)
+    }
+
     /// The listing evidence of the portal's last verified read, if one was stored.
     pub async fn evidence(&self, job: &Job) -> Result<Option<StoredEvidence>> {
         let payload: Option<String> = sqlx::query_scalar(
@@ -608,5 +644,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, Some(42));
+    }
+
+    #[tokio::test]
+    async fn latest_decision_is_the_highest_attempt_and_removal_deletes_decisions() {
+        let data = tempfile::TempDir::new().unwrap();
+        let store = Store::open(&data.path().join("decisions.sqlite"))
+            .await
+            .unwrap();
+        let id = store.register("https://example.com/").await.unwrap();
+        let job = store.claim().await.unwrap().unwrap();
+        assert!(store.latest_decision(&id).await.unwrap().is_none());
+        let candidate = |method| crate::domain::ConnectionCandidate {
+            method,
+            entry_url: "https://example.com/".into(),
+            found_via: "start page".into(),
+            http_status: 200,
+            content_type: None,
+            sample_items: 1,
+            fields_seen: Vec::new(),
+            has_pagination: false,
+            score: 0.5,
+        };
+        use crate::domain::ConnectionMethod::{Html, Ocds};
+        let mut first =
+            crate::model::top_ranked(vec![candidate(Html), candidate(Ocds)], 1).unwrap();
+        store.record_decision(&job, &first).await.unwrap();
+        first.attempt = 2;
+        first.chosen = candidate(Ocds);
+        first.alternatives.clear();
+        store.record_decision(&job, &first).await.unwrap();
+        let latest = store.latest_decision(&id).await.unwrap().unwrap();
+        assert_eq!((latest.attempt, latest.chosen.method), (2, Ocds));
+        assert!(store.latest_decision("unknown").await.unwrap().is_none());
+
+        store.remove(&id).await.unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connection_decisions")
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(store.register("https://example.com/").await.unwrap(), id);
+        assert!(store.latest_decision(&id).await.unwrap().is_none());
     }
 }
