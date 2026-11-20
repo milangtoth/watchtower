@@ -403,7 +403,7 @@ async fn restart_records_interrupted_read_and_reschedules_active_portal() {
     let job = store.claim().await.unwrap().unwrap();
     drop(store);
     let reopened = Store::open(&db).await.unwrap();
-    reopened.recover().await.unwrap();
+    reopened.recover(Recovery::default().recheck).await.unwrap();
     assert!(
         reopened.auto_refresh().await.unwrap(),
         "scheduled reads start on"

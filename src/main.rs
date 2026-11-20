@@ -23,7 +23,8 @@ async fn main() -> Result<()> {
         .await
         .context("Could not create the data directory")?;
     let store = Store::open(&data.join("watchtower.sqlite3")).await?;
-    store.recover().await?;
+    let recovery = Recovery::default();
+    store.recover(recovery.recheck).await?;
     let interval = std::env::var("WATCHTOWER_READ_INTERVAL")
         .ok()
         .map(|value| value.parse::<i64>())
@@ -41,7 +42,7 @@ async fn main() -> Result<()> {
         interval,
         fetcher: Fetcher::new(files.clone())?,
         model: Arc::new(OpenAi::new(store.clone())?),
-        recovery: Recovery::default(),
+        recovery,
     };
     let handle = tokio::spawn(worker.run(stop.clone()));
     let app = api::router(Api {

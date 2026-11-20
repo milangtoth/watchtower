@@ -177,8 +177,13 @@ impl Store {
         Ok(generation)
     }
 
-    pub async fn recover(&self) -> Result<()> {
+    /// Prepares stored state after a restart. Interrupted work is recorded as failed and read
+    /// again at once. A failed portal without a scheduled read, which older versions left
+    /// behind, is rechecked after `recheck` seconds like any newly failed portal.
+    pub async fn recover(&self, recheck: i64) -> Result<()> {
         let mut tx = self.0.begin().await?;
+        sqlx::query("UPDATE portals SET next_read_at = ? WHERE deleted = 0 AND state = 'failed' AND next_read_at IS NULL")
+            .bind(Utc::now().timestamp().saturating_add(recheck)).execute(&mut *tx).await?;
         sqlx::query("UPDATE portals SET next_read_at = 0 WHERE deleted = 0 AND (state IN ('integrating', 'healing') OR EXISTS (SELECT 1 FROM runs r WHERE r.portal_id = portals.id AND r.generation = portals.generation AND r.started_at IS NOT NULL AND r.finished_at IS NULL))")
             .execute(&mut *tx).await?;
         sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE started_at IS NOT NULL AND finished_at IS NULL")
@@ -560,5 +565,48 @@ impl Store {
             .bind(operation.as_str()).bind(model).bind(usage.input).bind(usage.cached_input).bind(usage.output)
             .bind(&job.portal_id).bind(job.generation).execute(&self.0).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn restart_schedules_a_recheck_for_failed_portals_left_unscheduled() {
+        let data = tempfile::TempDir::new().unwrap();
+        let store = Store::open(&data.path().join("recover.sqlite"))
+            .await
+            .unwrap();
+        let id = store.register("https://example.com/").await.unwrap();
+        // How versions before the recovery policy left a failed portal.
+        sqlx::query("UPDATE portals SET state = 'failed', next_read_at = NULL WHERE id = ?")
+            .bind(&id)
+            .execute(&store.0)
+            .await
+            .unwrap();
+        let before = Utc::now().timestamp();
+        store.recover(6 * 3600).await.unwrap();
+        let next: Option<i64> = sqlx::query_scalar("SELECT next_read_at FROM portals WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+        let next = next.expect("the failed portal is scheduled again");
+        assert!((before + 6 * 3600..=Utc::now().timestamp() + 6 * 3600).contains(&next));
+
+        // A portal that already has a scheduled read keeps it.
+        sqlx::query("UPDATE portals SET next_read_at = 42 WHERE id = ?")
+            .bind(&id)
+            .execute(&store.0)
+            .await
+            .unwrap();
+        store.recover(6 * 3600).await.unwrap();
+        let kept: Option<i64> = sqlx::query_scalar("SELECT next_read_at FROM portals WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+        assert_eq!(kept, Some(42));
     }
 }
