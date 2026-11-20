@@ -1,0 +1,233 @@
+[
+  {
+    "portal": "cf",
+    "label": 1,
+    "url": "https://www.contractsfinder.service.gov.uk/harvester/Notices/Data/CSV/2026/11/19",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "cf",
+    "label": 1,
+    "url": "https://www.contractsfinder.service.gov.uk/Notice/00d3b93f-4418-4abc-b4cb-dc9d1f6b9a39",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "cf",
+    "label": 1,
+    "url": "https://www.contractsfinder.service.gov.uk/Notice/02e0ce0a-7591-451a-818d-17b9168c402d",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "de",
+    "label": 1,
+    "url": "https://oeffentlichevergabe.de/api/notice-exports?pubDay=2026-11-19&format=ocds.zip",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "de",
+    "label": 1,
+    "url": "https://oeffentlichevergabe.de/api/notices/000e7272-1a79-44f2-a9af-3a8e3bfba058?format=pdf",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "de",
+    "label": 1,
+    "url": "https://oeffentlichevergabe.de/api/notices/00887dcd-2137-427e-864c-1cecc417286a?format=pdf",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "fr",
+    "label": 1,
+    "url": "https://www.boamp.fr/api/explore/v2.1/catalog/datasets/boamp/records?where=dateparution+%3D+date%272026-11-19%27&order_by=idweb&limit=100&offset=100",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "fr",
+    "label": 1,
+    "url": "https://www.boamp.fr/pages/avis/?q=idweb:26-111765",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "fr",
+    "label": 1,
+    "url": "https://www.boamp.fr/pages/avis/?q=idweb:26-111767",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "nl",
+    "label": 1,
+    "url": "https://www.tenderned.nl/cms/sites/default/files/2026-10/Dataset_Tenderned-2026-01-01-2026-10-01.json",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "nl",
+    "label": 1,
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/406824",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "nl",
+    "label": 1,
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/406826",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "ted",
+    "label": 1,
+    "url": "https://api.ted.europa.eu/v3/notices/search",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "ted",
+    "label": 1,
+    "url": "https://ted.europa.eu/en/notice/-/detail/803777-2026",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "ted",
+    "label": 1,
+    "url": "https://ted.europa.eu/en/notice/-/detail/803778-2026",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "uk",
+    "label": 1,
+    "url": "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?updatedFrom=2026-11-19T00:00:00&updatedTo=2026-11-19T23:59:59&limit=100&cursor=dXBkYXRlZEZyb209MjAyNi0xMS0xOVQwMDowMDowMHx1cGRhdGVkVG89MjAyNi0xMS0xOVQyMzo1OTo1OXxuZXh0Q3Vyc29yPTc2MTQ4Ng==",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "uk",
+    "label": 1,
+    "url": "https://www.find-tender.service.gov.uk/Notice/109506-2026",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "uk",
+    "label": 1,
+    "url": "https://www.find-tender.service.gov.uk/Notice/109507-2026",
+    "text": "",
+    "evidence": "previously collected notice or located publisher response"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/nieuws/meer-grip-op-informatiebeveiliging-en-privacy-met-duecare",
+    "text": "Meer grip op informatiebeveiliging en privacy met DueCare",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/nieuws",
+    "text": "Nieuws",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/contact",
+    "text": "Service en contact",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/over-deze-site/toegankelijkheid",
+    "text": "Toegankelijkheid",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/privacyverklaring",
+    "text": "Privacyverklaring",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/over-deze-site/cookies",
+    "text": "Cookies",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "nl",
+    "label": 0,
+    "url": "https://www.tenderned.nl/cms/nl/nieuws/aanmelden-tenderned-update",
+    "text": "Nieuwsbrief",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "fr",
+    "label": 0,
+    "url": "https://www.boamp.fr/pages/entreprise-actualites",
+    "text": "Actualités",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "fr",
+    "label": 0,
+    "url": "https://www.boamp.fr/pages/aide/",
+    "text": "Aide et questions fréquentes",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "fr",
+    "label": 0,
+    "url": "https://www.boamp.fr/pages/accessibilite/",
+    "text": "Accessibilité : partiellement\n                                conforme",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "ted",
+    "label": 0,
+    "url": "https://ted.europa.eu/en/help",
+    "text": "Help",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "ted",
+    "label": 0,
+    "url": "https://ted.europa.eu/en/contact",
+    "text": "Contact the TED helpdesk",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "ted",
+    "label": 0,
+    "url": "https://ted.europa.eu/en/legal-notice",
+    "text": "Legal notice",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "ted",
+    "label": 0,
+    "url": "https://ted.europa.eu/en/cookie-choice",
+    "text": "Cookies",
+    "evidence": "observed support, policy or news navigation"
+  },
+  {
+    "portal": "ted",
+    "label": 0,
+    "url": "https://ted.europa.eu/en/accessibility",
+    "text": "Accessibility",
+    "evidence": "observed support, policy or news navigation"
+  }
+]

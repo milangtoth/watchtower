@@ -183,9 +183,25 @@ impl Store {
         Ok(())
     }
 
+    pub async fn auto_refresh(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM preferences WHERE name = 'auto_refresh' AND enabled = 1)",
+        )
+        .fetch_one(&self.0)
+        .await?)
+    }
+
+    pub async fn set_auto_refresh(&self, enabled: bool) -> Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO preferences(name, enabled) VALUES('auto_refresh', ?)")
+            .bind(enabled)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
     pub async fn enqueue_due(&self) -> Result<()> {
         let mut tx = self.0.begin().await?;
-        let portals: Vec<(String, i64)> = sqlx::query_as("SELECT id, generation FROM portals p WHERE deleted = 0 AND next_read_at <= ? AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.portal_id = p.id AND r.generation = p.generation AND r.finished_at IS NULL)")
+        let portals: Vec<(String, i64)> = sqlx::query_as("SELECT id, generation FROM portals p WHERE EXISTS(SELECT 1 FROM preferences WHERE name = 'auto_refresh' AND enabled = 1) AND deleted = 0 AND next_read_at <= ? AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.portal_id = p.id AND r.generation = p.generation AND r.finished_at IS NULL)")
             .bind(Utc::now().timestamp()).fetch_all(&mut *tx).await?;
         for (id, generation) in portals {
             sqlx::query(INSERT_RUN)

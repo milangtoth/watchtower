@@ -1,46 +1,55 @@
-# Candidate inventory. A qualified positive case has five or more current tenders
-# with documents confirmed to download without credentials.
+# Real-portal inventory, combined from the portal test set and the machine-learning
+# test set (reference snapshots from 2026-11-20). Pass only `url` to Watchtower.
+# `split: holdout` entries stay unseen until the final run. A qualified positive case
+# has five or more current tenders with documents that download without credentials.
+# `evidence` and `samples` point to independently collected answers for the evaluator.
 portals:
   - name: UK Legal Aid Agency
     url: https://www.gov.uk/government/collections/tenders-for-legal-aid-contracts
     country: GB
     software: GOV.UK Publishing Platform
     kind: server-rendered
+    split: development
     expect: serving
     readiness: attachment-verified
     note: Latest verified read matched seven source entries and classified four as open.
-    evidence: ../docs/attachment-link-triage.md
+    evidence: govuk-laa-baseline.json
 
   - name: TenderNed
-    url: https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties?page=0&size=50&publicatieDatumPreset=AF30
-    public_page: https://www.tenderned.nl/aankondigingen/overzicht
+    url: https://www.tenderned.nl/aankondigingen/overzicht
     country: NL
     software: TenderNed
     kind: js-app
+    split: development
     expect: serving
     readiness: five-public-downloads-verified
-    note: The listing UI uses this public JSON route. Five open tenders and PDF downloads verified. Watchtower attachment untested.
+    note: The listing UI loads https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties?page=0&size=50&publicatieDatumPreset=AF30. Use that JSON route only for a separate direct-JSON trial.
     evidence: tenderned-baseline.json
+    samples: NL.json
 
   - name: Deutsches Vergabeportal
     url: https://dtvp.de/ausschreibungen/
     country: DE
     software: DTVP
     kind: multi-step
+    split: development
     expect: serving
     readiness: five-public-downloads-verified
     note: Five source downloads verified. Watchtower failed discovery after six calls because it could not verify a complete paginated listing.
     evidence: dtvp-baseline.json
 
   - name: Ireland eTenders
-    url: https://www.etenders.gov.ie/epps/quickSearchAction.do?T01_ps=50&latest=true&searchType=cftFTS
+    url: https://www.etenders.gov.ie/epps/prepareCurrentOpportunities.do?currentType=cft
+    alternative_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?T01_ps=50&latest=true&searchType=cftFTS
     country: IE
     software: European Dynamics ePPS
     kind: multi-step
+    split: development
     expect: serving
     readiness: five-public-downloads-verified
-    note: Five source downloads verified through the public Proceed without association option. Watchtower attachment untested.
+    note: Five source downloads verified through the public Proceed without association option.
     evidence: etenders-ie-baseline.json
+    samples: IE.json
 
   - name: Catalonia PSCP
     url: https://contractaciopublica.cat/portal-api/ultimes-publicacions?page=0&size=100&tipus=104
@@ -48,16 +57,27 @@ portals:
     country: ES
     software: PSCP
     kind: js-app
+    split: development
     expect: serving
     readiness: five-public-downloads-verified
     note: The portal UI lists open notices using this JSON route. Five open tenders and administrative specifications verified. Watchtower attachment untested.
     evidence: catalonia-pscp-baseline.json
+
+  - name: Masaryk University E-ZAK
+    url: https://zakazky.muni.cz/contract_index.html
+    country: CZ
+    software: E-ZAK
+    kind: server-rendered
+    split: development
+    expect: serving
+    samples: CZ.json
 
   - name: e-Zamówienia
     url: https://www.ezamowienia.gov.pl/mp-client/search/list/
     country: PL
     software: e-Zamówienia
     kind: js-app
+    split: development
     expect: serving
     readiness: needs-five-download-baseline
     note: Initial HTML response contained no tender anchors.
@@ -68,18 +88,29 @@ portals:
     country: GB
     software: European Dynamics ePPS
     kind: multi-step
+    split: development
     expect: failed
     readiness: blocked-verified
     expected_blocker: CAPTCHA required by the search form
+
+  - name: Central Bedfordshire In-tend
+    url: https://in-tendhost.co.uk/centralbedfordshire/aspx/Tenders/Current
+    country: GB
+    software: In-tend
+    kind: multi-step
+    split: development
+    expect: failed
+    reason: Registration and an expression of interest are required for document access.
+    evidence: https://www.centralbedfordshire.gov.uk/business/procurement-and-tender-opportunities
 
   - name: BOAMP
     url: https://www.boamp.fr/pages/recherche/?sort=dateparution
     country: FR
     software: BOAMP
     kind: multi-step
+    split: holdout
     expect: serving
     readiness: needs-five-download-baseline
-    holdout: true
     evidence: https://www.boamp.fr/pages/entreprise-accueil/
 
   - name: Contracts Finder
@@ -87,6 +118,24 @@ portals:
     country: GB
     software: Contracts Finder
     kind: multi-step
+    split: holdout
     expect: serving
     readiness: needs-five-download-baseline
-    holdout: true
+
+  - name: Malta eTenders
+    url: https://www.etenders.gov.mt/epps/prepareCurrentOpportunities.do?currentType=cft
+    country: MT
+    software: European Dynamics ePPS
+    kind: multi-step
+    split: holdout
+    expect: serving
+    samples: MT.json
+
+  - name: Toruń platformazakupowa
+    url: https://platformazakupowa.pl/pn/wszz_torun/proceedings
+    country: PL
+    software: Open Nexus platformazakupowa.pl
+    kind: server-rendered
+    split: holdout
+    expect: serving
+    samples: PL.json

@@ -1,8 +1,16 @@
 # Real-portal test set
 
-[portals.yaml](portals.yaml) records public listings, verified attachments, an observed CAPTCHA gate, and two candidates reserved for final testing. The readiness field records the evidence available for each entry. A positive case with `needs-five-download-baseline` still needs qualification.
+[portals.yaml](portals.yaml) records public listings, verified attachments, observed access blocks, and four holdout portals reserved for the final run. Each entry has `split: development` or `split: holdout`. Where present, `readiness` records the evidence available for that entry; a positive case with `needs-five-download-baseline` still needs qualification.
 
-As of 20 November 2026, the source baseline covers four countries and four software packages. DTVP, Ireland eTenders, Catalonia PSCP, and TenderNed each had five open tenders with a verified anonymous download. Watchtower's live results are tracked separately in [live validation](../docs/live-validation.md).
+As of 20 November 2026 the inventory lists 13 portals in nine countries on 11 portal software packages. Two sets of independently collected answers sit beside it: the `*-baseline.json` files and the country sample files (`CZ.json`, `IE.json`, `MT.json`, `NL.json`, `PL.json`). Watchtower's live results are tracked separately in [live validation](../docs/live-validation.md).
+
+## Run the test set
+
+Use the development entries first. Reserve the holdout entries for a final run on a fresh Watchtower instance. For each case, post only its listing URL to `POST /portals` and poll `GET /portals/{id}`. Keep the baseline and country files outside the agent's inputs.
+
+The country files contain reference samples observed on 20 November 2026. Each row identifies a tender and one procurement document downloaded anonymously. Match the tender by source URL or portal identifier, compare the recorded fields, then fetch the document from Watchtower and compare its byte length and SHA-256. On TenderNed the ID identifies a publication and `referenceNumber` identifies the procurement.
+
+Five is the sample size. Watchtower should return every open tender and its documents. Additional tenders and files are expected. A missing field in a reference row is unscored. For later live runs, check the source for expiry, amendments or withdrawal before treating a difference as a regression. For a blocked case, check for a failed state and a reason that names the login, registration or CAPTCHA requirement. Space requests to each portal at least one second apart.
 
 ## Qualify a positive case
 

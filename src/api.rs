@@ -105,6 +105,10 @@ pub fn router(api: Api) -> Router {
         router = router.route(path, get(move || async move { asset(content_type, body) }));
     }
     router
+        .route(
+            "/settings/auto-refresh",
+            get(refresh_preference).post(update_refresh_preference),
+        )
         .route("/portals", get(list).post(register))
         .route("/portals/{id}", get(portal).delete(remove))
         .route("/portals/{id}/refresh", axum::routing::post(refresh))
@@ -165,6 +169,26 @@ struct Registration {
 struct TenderQuery {
     #[serde(rename = "changedSince")]
     changed_since: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct RefreshPreference {
+    enabled: bool,
+}
+
+async fn refresh_preference(State(api): State<Api>) -> Result<Json<RefreshPreference>, ApiError> {
+    Ok(Json(RefreshPreference {
+        enabled: api.store.auto_refresh().await?,
+    }))
+}
+
+async fn update_refresh_preference(
+    State(api): State<Api>,
+    payload: Result<Json<RefreshPreference>, JsonRejection>,
+) -> Result<Json<RefreshPreference>, ApiError> {
+    let preference = payload.map_err(|err| ApiError::invalid(err.body_text()))?;
+    api.store.set_auto_refresh(preference.enabled).await?;
+    Ok(preference)
 }
 
 async fn register(

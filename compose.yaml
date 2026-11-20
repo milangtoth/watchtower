@@ -1,0 +1,22 @@
+services:
+  watchtower:
+    build: .
+    env_file: .env
+    volumes:
+      - watchtower-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+  atlas:
+    build: "./Tender Atlas - source"
+    environment:
+      PORT: "43871"
+      WATCHTOWER_URL: http://watchtower:8080
+    ports:
+      - "127.0.0.1:43871:43871"
+    volumes:
+      - atlas-data:/data
+    depends_on:
+      - watchtower
+volumes:
+  atlas-data:
+  watchtower-data:
