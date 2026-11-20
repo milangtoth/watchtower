@@ -1,7 +1,9 @@
 pub mod api;
+mod dashboard;
 pub mod db;
 pub mod domain;
 pub mod fetch;
 pub mod model;
 pub mod recipe;
+mod voice;
 pub mod worker;

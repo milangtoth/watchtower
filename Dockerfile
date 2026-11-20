@@ -1,3 +1,8 @@
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS dashboard-assets
+WORKDIR /dashboard
+COPY src/dashboard/package.json src/dashboard/package-lock.json ./
+RUN npm ci --no-audit --no-fund && npm run build
+
 FROM --platform=$BUILDPLATFORM rust:1.100-slim-bookworm AS build
 ARG TARGETARCH
 WORKDIR /build
@@ -35,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data
 COPY --from=build /out/watchtower /usr/local/bin/watchtower
-ENV WATCHTOWER_DATA_DIR=/data
+COPY --from=dashboard-assets /dashboard/elevenlabs-sdk.js /usr/local/share/watchtower/elevenlabs-sdk.js
+ENV WATCHTOWER_DATA_DIR=/data WATCHTOWER_DASHBOARD_ASSETS=/usr/local/share/watchtower
 EXPOSE 8080
 ENTRYPOINT ["watchtower"]

@@ -4,7 +4,7 @@ Watchtower learns to read public procurement portals, publishes tenders and thei
 
 ## Run
 
-Copy `.env.example` to `.env` and set `OPENAI_API_KEY` and `WATCHTOWER_MODEL` for live attachment. Choose an OpenAI model available to your account that supports Structured Outputs.
+Copy `.env.example` to `.env` and set `OPENAI_API_KEY` and `WATCHTOWER_MODEL` for live attachment. Choose an OpenAI model available to your account that supports Structured Outputs. Write values without quotes: Docker's `--env-file` passes quote characters through literally.
 
 ```sh
 docker build --platform linux/amd64 -t watchtower .
@@ -32,6 +32,32 @@ For local development, export the key and model in your shell and run `cargo run
 | `WATCHTOWER_DATA_DIR` | SQLite database and document blobs. Defaults to `./data` locally and `/data` in Docker. |
 | `WATCHTOWER_READ_INTERVAL` | Seconds between scheduled reads. Defaults to `900`. |
 | `RUST_LOG` | Service log filter. Defaults to `info`. |
+
+## Tender assistant
+
+Open **Tender assistant** from the operator dashboard. The assistant searches the published snapshots on `/portals/{id}/tenders` and shows source notices and available document links. Keyword search is available directly from the panel.
+
+Set `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` in your runtime environment for live voice. The agent ID is in the ElevenAgents dashboard URL. Docker bundles the browser SDK. For local Cargo runs, build that asset first:
+
+```sh
+npm --prefix src/dashboard ci
+npm --prefix src/dashboard run build
+cargo run --locked
+```
+
+Use localhost or HTTPS for microphone access. Keep the voice session route private to trusted dashboard users when hosting the app.
+
+For voice search, add an ElevenAgents **Client** tool named `search_tenders` and enable **Wait for response**. Configure these optional string parameters:
+
+| Parameter | Use |
+|---|---|
+| `query` | Keywords from the notice, buyer, or reference |
+| `country` | Two-letter country of performance, such as `NL` or `DE` |
+| `cpv` | CPV code or prefix of two to eight digits |
+| `deadline_from` | Earliest closing date, inclusive, in `YYYY-MM-DD` |
+| `deadline_to` | Latest closing date, inclusive, in `YYYY-MM-DD` |
+
+Tell the agent to search before answering tender questions, repeat the search when the caller changes a filter, and mention partial coverage. For cross-language comparisons, use a CPV code supplied by the caller or found in earlier results. Enable the `user_transcript`, `agent_response`, and `agent_response_correction` events for captions. Publish the agent settings.
 
 ## How it works
 

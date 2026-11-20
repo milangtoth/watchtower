@@ -8,3 +8,6 @@ data/*
 .pytest_cache/
 
 /target/
+
+/src/dashboard/node_modules/
+/src/dashboard/elevenlabs-sdk.js
