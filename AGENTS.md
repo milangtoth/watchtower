@@ -6,21 +6,21 @@ Watchtower is a service for public procurement portals. Given a portal URL, it l
 
 ## Confirmed decisions
 
-- Build Watchtower in **Rust**. The existing scaffold is a reference for the migration. The Rust implementation is still to be scaffolded.
+- Build Watchtower in **Rust**. The Rust runtime lives in `src/`. The earlier scaffold is a reference.
 - Prioritize the Watchtower service and its end-to-end API flow. Use existing public procurement portals as development inputs. The mock portal is a secondary fixture for repeatable failures and repair tests. Its setup can proceed in parallel.
 
-## Architecture under review
+## Architecture
 
-The stack, interfaces, and workflow below are proposals for team discussion. The model provider, model ID, and budget are open.
+The first implementation uses Axum, Tokio, SQLite, and OpenAI. Set the exact model ID for your account before a live run.
 
-- Start with one Cargo package, using Axum for the API and dashboard and Tokio for the in-process scheduler. Start and stop the scheduler with the app lifecycle. Keep the API responsive during portal work.
+- Use one Cargo package with Axum for the API and dashboard and Tokio for the in-process scheduler. Start and stop the scheduler with the app lifecycle. Keep the API responsive during portal work.
 - Use SQLite via SQLx for portals, runs, recipes, and published tenders. Store document bytes under `WATCHTOWER_DATA_DIR` and keep their metadata in SQLite. Stage files before committing a snapshot that references them.
 - Use a shared `reqwest` client for listing, detail, document, and model exploration requests. Route redirects and retries through the same rate limiter. Use bounded timeouts and report access blocks when they prevent delivery.
 - Start with server-rendered HTML and public JSON. Revisit browser support when a representative test portal needs it and browser requests can obey the rate limit.
-- Keep provider-specific model calls in one module. Load model credentials from the environment. Record model calls, input tokens, and output tokens per portal and operation.
-- Serve a simple HTML dashboard on `/`. Show state, reason, last success, tender count, recent reads and repairs, and links to tenders and downloaded files. Decide whether to include operator controls.
+- Keep OpenAI Responses API calls in the model module. Supply `OPENAI_API_KEY` and `WATCHTOWER_MODEL` through the environment. Record input, cached input, and output tokens per portal and operation.
+- Serve a simple HTML dashboard on `/`. Show state, reason, last success, tender count, recent reads and repairs, and links to tenders and downloaded files. The dashboard is read-only. Use the API for portal registration and refresh.
 
-## Proposed shared interfaces
+## Shared interfaces
 
 | Surface | Owner | What it passes across the boundary |
 |---|---|---|
@@ -32,7 +32,7 @@ The stack, interfaces, and workflow below are proposals for team discussion. The
 
 Agree on one recipe example, one candidate read example, and one check result before implementing both sides. Keep API response types in the `api` module and keep fetching and validation independent of API handlers. The worker connects the parts.
 
-## Proposed read, check, and repair flow
+## Read, check, and repair flow
 
 1. **Attach.** Return the portal ID immediately from `POST /portals`. Start a background `read` run in `integrating`. Give the LLM bounded access to page and JSON samples through the shared fetcher. Treat fetched content as untrusted data. Validate the proposed recipe and execute it with the same runner used for subsequent reads. Execute only operations defined in the recipe schema.
 2. **Check.** Verify pagination, field quality, documents, and source evidence. Use LLM verification on first attach, suspicious reads, and repaired candidates. Keep healthy repeat reads deterministic. Require evidence of complete pagination even when HTTP status and tender counts look normal.
@@ -43,7 +43,7 @@ Use a shared per-portal scheduling guard for attach, periodic reads, refresh, an
 
 ## Patterno integration and challenge constraints
 
-- Patterno runs the submitted container and calls Watchtower's HTTP API on port 8080. The challenge API has no authentication. Patterno supplies portal URLs; Watchtower fetches the source data and serves normalized tenders and file bytes from its own API.
+- Patterno runs the submitted container and calls Watchtower's HTTP API on port 8080. The challenge API has no authentication. Patterno supplies portal URLs. Watchtower fetches the source data and serves normalized tenders and file bytes from its own API.
 - The judge can register a portal with `POST /portals`, poll `GET /portals/{id}`, pull tenders with `GET /portals/{id}/tenders`, and download files from the paths in each tender. `changedSince` supports incremental pulls. The API also exposes refresh, run history, and removal. The dashboard is served at `/`.
 - Preserve exact appendix routes, status codes, response shapes, and casing. Repeated registration of the same URL returns the same ID. Unknown IDs return 404. `changedSince` is strictly later than the supplied timestamp.
 - Keep serving the last correct tenders while a portal is `healing`. Report a login or captcha that prevents delivery as `failed`, with the blocker in the reason.
@@ -59,4 +59,4 @@ Use a shared per-portal scheduling guard for attach, periodic reads, refresh, an
 - Make the first end-to-end milestone a Rust service that accepts a public portal URL, starts a background read, and serves verified tenders and their document bytes through the API. A handwritten recipe can unblock runner integration. Repeat from a clean start with URL-only model learning before counting attachment as complete.
 - Give the mock portal a layout change that still returns HTTP 200 and breaks the old recipe. Use it to verify `serving → healing → serving`, continued access to the last verified data, and recorded repair history. Test a genuine document-access block separately.
 - Use `testset/portals.yaml` for real portal tests. Aim for four countries, three portal software packages, at least five open tenders with public documents per positive case, and one or two access-blocked cases. Cover server-rendered, JavaScript, and multi-step sites, and hold back a few portals for final testing.
-- Once the Rust scaffold is in place, use `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test` locally. Run the contract checker and the complete demo against the built container as they become available. Verify the `linux/amd64` build early. Record test results and remaining gaps in the PR.
+- Use `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` locally. Run the contract checker and the complete demo against the built container as they become available. Verify the `linux/amd64` build early. Record test results and remaining gaps in the PR.
