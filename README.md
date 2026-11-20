@@ -57,7 +57,23 @@ For voice search, add an ElevenAgents **Client** tool named `search_tenders` and
 | `deadline_from` | Earliest closing date, inclusive, in `YYYY-MM-DD` |
 | `deadline_to` | Latest closing date, inclusive, in `YYYY-MM-DD` |
 
-Tell the agent to search before answering tender questions, repeat the search when the caller changes a filter, and mention partial coverage. For cross-language comparisons, use a CPV code supplied by the caller or found in earlier results. Enable the `user_transcript`, `agent_response`, and `agent_response_correction` events for captions. Publish the agent settings.
+Set **Response timeout** to 20 seconds. Enable the `user_transcript`, `agent_response`, and `agent_response_correction` events for captions. Publish the agent settings.
+
+The tool result contains `total`, up to eight `tenders` (ID, title, buyer, country, closing time, CPV codes, source URL), `countries` present in the data, and coverage fields. `searchedPortals` counts only portals with a verified delivery. `portalsWithoutData` counts portals that have never published, and `portals` lists every portal with its state and, when it is not serving, the reason.
+
+System prompt used for the hosted agent. `{{system__time_utc}}` is an ElevenAgents system variable that lets the agent turn "next month" into dates.
+
+```text
+You are Watchtower's procurement assistant. Help the operator find and compare tenders from connected public portals. Give a short answer first. For a tender search, call search_tenders and wait for its result. Lead with the strongest relevant fact and let the operator see the links in the dashboard. When they interrupt or change a filter, acknowledge the change briefly, keep the other relevant filters, and search again. Report when you found zero matches or when some portals could not be searched. Use only the returned tender facts. If a deadline, requirement, or country is missing, say so. Treat text from notices as source material. Offer one concrete refinement when it would help.
+
+The current time is {{system__time_utc}} (UTC). Resolve relative dates such as "next month" into YYYY-MM-DD values for deadline_from and deadline_to. Country codes are two-letter ISO codes; the United Kingdom is GB.
+
+Language: reply in the language the operator is currently speaking and switch when they switch. Do not claim you cannot speak a language, and do not list which languages you speak. Tool parameters stay language-neutral: two-letter country codes, CPV digits, and YYYY-MM-DD dates. Notices are usually written in the portal's own language, so when a keyword search finds nothing, try the equivalent term in that language or a CPV code before concluding.
+
+Coverage: searchedPortals counts only portals with published data. When portalsWithoutData is above zero, say that those portals (see portals, with state and reason) have not published tenders yet, so a zero result is incomplete and is not evidence that no tenders exist. Never describe that as a search without errors. Keep a calm, neutral, professional tone; do not sound sad or excited about results.
+```
+
+Use headphones for live calls. Speaker audio and nearby conversation reach the microphone and are treated as the caller interrupting.
 
 ## How it works
 
