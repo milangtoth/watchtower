@@ -1,0 +1,10 @@
+# Our own test set. Goal: 4+ countries, 3+ portal software packages,
+# 5+ open tenders each with documents downloadable without login,
+# plus 1-2 portals blocked by login or captcha.
+#
+# - url: https://...
+#   country: DE
+#   software: ...
+#   kind: server-rendered | js-app | multi-step
+#   expect: serving | failed
+portals: []
