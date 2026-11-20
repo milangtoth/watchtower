@@ -7,3 +7,8 @@ mock_portal
 testset
 *.pdf
 __pycache__
+
+target
+
+Tender Atlas - source
+tender-atlas-*.jsonl
