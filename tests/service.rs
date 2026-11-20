@@ -645,3 +645,51 @@ async fn public_json_explicit_empty_and_invalid_recipe() {
     assert!(bad.validate().is_err());
     server.abort();
 }
+
+#[tokio::test]
+async fn connection_returns_latest_decision_null_before_one_and_404_for_unknown_portals() {
+    let data = TempDir::new().unwrap();
+    let store = Store::open(&data.path().join("connection.sqlite"))
+        .await
+        .unwrap();
+    let app = api::router(Api {
+        store: store.clone(),
+        jobs: Jobs::default(),
+        files: Arc::new(data.path().join("files")),
+    });
+    let (status, _) = call(&app, "GET", "/portals/unknown/connection", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let portal = store.register("https://example.com/").await.unwrap();
+    let path = format!("/portals/{portal}/connection");
+    assert_eq!(get_json(&app, &path).await, Value::Null);
+
+    let job = store.claim().await.unwrap().unwrap();
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/connection_decision.json")).unwrap();
+    let mut first: ConnectionDecision = serde_json::from_value(fixture.clone()).unwrap();
+    first.attempt = 1;
+    first.chosen.method = watchtower::domain::ConnectionMethod::Html;
+    store.record_decision(&job, &first).await.unwrap();
+    let second: ConnectionDecision = serde_json::from_value(fixture.clone()).unwrap();
+    store.record_decision(&job, &second).await.unwrap();
+    let latest = get_json(&app, &path).await;
+    assert_eq!(
+        latest, fixture,
+        "the latest attempt, in the shared camelCase shape"
+    );
+    assert_eq!(latest["chosen"]["method"], "ocds");
+
+    store.remove(&portal).await.unwrap();
+    let (status, _) = call(&app, "GET", &path, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        store.register("https://example.com/").await.unwrap(),
+        portal
+    );
+    assert_eq!(
+        get_json(&app, &path).await,
+        Value::Null,
+        "a new registration starts without the removed decision"
+    );
+}

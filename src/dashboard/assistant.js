@@ -154,6 +154,11 @@ async function startCall() {
           const result = await lookupTender(input ?? {}, call.controller.signal);
           return JSON.stringify(result);
         },
+        explain_portal: async input => {
+          if (call !== activeCall || call.ending) return JSON.stringify({ error: "The voice session has ended." });
+          const result = await explainPortal(input ?? {}, call.controller.signal);
+          return JSON.stringify(result);
+        },
       },
     });
 
@@ -318,6 +323,78 @@ async function lookupTender(input, callSignal) {
     return tenderDetail(tender, portal, lastSuccessAt, ref);
   } catch (error) {
     return { error: callSignal.aborted ? "The voice session has ended." : error.message };
+  }
+}
+
+const NAME_FILLER = new Set(["a", "an", "the", "of", "portal", "site", "website"]);
+
+async function getJson(path, signal) {
+  const response = await fetch(path, { cache: "no-store", signal });
+  if (!response.ok) throw new Error(`Watchtower answered HTTP ${response.status} for ${path}.`);
+  return response.json();
+}
+
+/** Finds portals by exact ID, or by name words that all appear in the portal URL, such as "Find a Tender". */
+function matchPortals(portals, query) {
+  const exact = portals.filter(portal => portal.id === query);
+  if (exact.length) return exact;
+  const words = query.toLowerCase().split(/[^a-z0-9]+/).filter(word => word && !NAME_FILLER.has(word));
+  if (!words.length) return [];
+  return portals.filter(portal => {
+    const url = portal.url.toLowerCase().replace(/^https?:\/\//, "");
+    const compact = url.replace(/[^a-z0-9]/g, "");
+    return words.every(word => url.includes(word)) || compact.includes(words.join(""));
+  });
+}
+
+function candidateFacts(candidate) {
+  return {
+    method: candidate.method,
+    entryUrl: candidate.entryUrl,
+    foundVia: candidate.foundVia,
+    httpStatus: candidate.httpStatus,
+    sampleItems: candidate.sampleItems,
+    fieldsSeen: candidate.fieldsSeen,
+    hasPagination: candidate.hasPagination,
+    score: candidate.score,
+  };
+}
+
+/** Read-only: a portal's delivery state and how Watchtower connects to it. */
+async function explainPortal({ portal: query }, signal) {
+  const wanted = String(query ?? "").trim();
+  if (!wanted) return { error: "Say which portal to explain, by name or ID." };
+  try {
+    const portals = await getJson("/portals", signal);
+    const known = portals.map(portal => ({ id: portal.id, url: portal.url, state: portal.state }));
+    const matches = matchPortals(portals, wanted);
+    if (!matches.length) return { error: `No registered portal matches "${wanted}".`, registeredPortals: known };
+    if (matches.length > 1) {
+      return { error: `Several portals match "${wanted}". Ask the operator which one they mean.`, matches: matches.map(portal => ({ id: portal.id, url: portal.url })) };
+    }
+    const base = "/portals/" + encodeURIComponent(matches[0].id);
+    const [portal, decision] = await Promise.all([getJson(base, signal), getJson(base + "/connection", signal)]);
+    return {
+      id: portal.id,
+      url: portal.url,
+      state: portal.state,
+      reason: portal.reason,
+      lastSuccessAt: portal.lastSuccessAt,
+      tenderCount: portal.tenderCount,
+      connection: decision
+        ? {
+            chosen: candidateFacts(decision.chosen),
+            rationale: decision.rationale,
+            model: decision.model,
+            decidedAt: decision.decidedAt,
+            attempt: decision.attempt,
+            alternatives: decision.alternatives.map(candidateFacts),
+          }
+        : null,
+      connectionNote: decision ? undefined : "No connection decision is recorded for this portal yet.",
+    };
+  } catch (error) {
+    return { error: signal.aborted ? "The voice session has ended." : error.message };
   }
 }
 
