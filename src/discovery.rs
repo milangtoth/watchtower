@@ -1,35 +1,14 @@
 //! Finding and ordering the ways a portal can be read, before any model call.
 //!
-//! `probe` (owned by David) makes cheap requests through the portal's rate-limited client and
-//! reports candidate connection methods. `rank` (owned by qwas) orders them with an embedded
-//! scorer. Until those land, both are placeholders that keep today's behaviour: the submitted
-//! address is the only candidate, read as an HTML listing.
+//! `probe` (owned by David, in `discovery/probe.rs`) makes cheap requests through the portal's
+//! rate-limited client and reports candidate connection methods. `rank` (owned by qwas) orders
+//! them with an embedded scorer; until it lands it is a placeholder that keeps the probe's order.
 
-use crate::{
-    domain::{ConnectionCandidate, ConnectionMethod, ReadFailure},
-    fetch::PortalHttp,
-};
-use reqwest::Url;
+use crate::domain::ConnectionCandidate;
 
-/// Finds candidate connection methods for a portal. Every request must go through `http`, which
-/// enforces one request per second per portal. A login or CAPTCHA that blocks every route is
-/// reported as `ReadFailure::Blocked`.
-///
-/// Placeholder: returns the submitted address as an HTML candidate without fetching it.
-pub async fn probe(url: &Url, http: &PortalHttp) -> Result<Vec<ConnectionCandidate>, ReadFailure> {
-    let _ = http;
-    Ok(vec![ConnectionCandidate {
-        method: ConnectionMethod::Html,
-        entry_url: url.to_string(),
-        found_via: "start page".into(),
-        http_status: 0,
-        content_type: None,
-        sample_items: 0,
-        fields_seen: Vec::new(),
-        has_pagination: false,
-        score: 0.0,
-    }])
-}
+mod probe;
+
+pub use probe::probe;
 
 /// Orders candidates from most to least promising and sets each `score` between 0 and 1.
 ///
@@ -42,7 +21,10 @@ pub fn rank(mut candidates: Vec<ConnectionCandidate>) -> Vec<ConnectionCandidate
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{domain::ConnectionDecision, fetch::Fetcher, model::top_ranked};
+    use crate::{
+        domain::{ConnectionDecision, ConnectionMethod},
+        model::top_ranked,
+    };
 
     fn candidate(method: ConnectionMethod, score: f32) -> ConnectionCandidate {
         ConnectionCandidate {
@@ -56,17 +38,6 @@ mod tests {
             has_pagination: true,
             score,
         }
-    }
-
-    #[tokio::test]
-    async fn placeholder_probe_offers_the_submitted_address_as_html() {
-        let files = tempfile::tempdir().unwrap();
-        let url = Url::parse("https://portal.example/tenders").unwrap();
-        let http = Fetcher::new(files.path().into()).unwrap().portal(&url);
-        let candidates = probe(&url, &http).await.unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].method, ConnectionMethod::Html);
-        assert_eq!(candidates[0].entry_url, url.as_str());
     }
 
     #[test]
