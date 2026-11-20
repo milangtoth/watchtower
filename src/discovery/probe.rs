@@ -3,15 +3,15 @@
 //!
 //! Detectors run in order within `REQUEST_BUDGET` requests:
 //! 1. the start page (HTML alternates and machine links, or a JSON, OCDS, feed or sitemap body),
-//! 2. known national sources on the same host (official APIs such as Find a Tender's OCDS),
-//! 3. sitemaps from `robots.txt`, `<link rel="sitemap">` or `/sitemap.xml`,
-//! 4. one sample of each discovered feed or JSON URL,
-//! 5. links to TED notices,
-//! 6. the start page as an HTML fallback, which is always offered.
+//! 2. sitemaps from `robots.txt`, `<link rel="sitemap">` or `/sitemap.xml`,
+//! 3. one sample of each discovered feed or JSON URL,
+//! 4. links to TED notices,
+//! 5. the start page as an HTML fallback, which is always offered.
 //!
-//! Every request goes through the portal's rate-limited client. A login or CAPTCHA on the start
-//! page ends probing with `ReadFailure::Blocked`. A plain HTTP 403 on the start page does not:
-//! portals that refuse scrapers often publish an official API, so the other detectors still run.
+//! Detection is generic: there are no per-portal rules, so nothing depends on which portals are
+//! in the test set. Every request goes through the portal's rate-limited client. A login or
+//! CAPTCHA on the start page ends probing with `ReadFailure::Blocked`. A plain HTTP 403 on the
+//! start page does not: the site's sitemaps may still be readable, so they are still tried.
 
 use crate::{
     domain::{ConnectionCandidate, ConnectionMethod, ReadFailure},
@@ -44,21 +44,6 @@ pub(crate) const FIELDS: [&str; 7] = [
     "documents",
     "cpv",
     "id",
-];
-
-/// Official machine endpoints of national publishers, keyed by the portal host. Only used when
-/// the start page is on that same host, so probing never leaves the portal's site.
-const KNOWN_SOURCES: [(&str, ConnectionMethod, &str); 2] = [
-    (
-        "www.find-tender.service.gov.uk",
-        ConnectionMethod::Ocds,
-        "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?limit=20",
-    ),
-    (
-        "www.boamp.fr",
-        ConnectionMethod::Json,
-        "https://www.boamp.fr/api/explore/v2.1/catalog/datasets/boamp/records?limit=20",
-    ),
 ];
 
 /// Words in a path or link text that suggest a machine-readable listing.
@@ -183,17 +168,14 @@ impl<S: Source> Probe<'_, S> {
             None => unreachable!("the start page is the first request"),
         }
 
-        // 2. Known national sources on this host.
-        let known = known_sources(&self.start);
-        leads.splice(0..0, known);
         if self.start.host_str().is_some_and(is_ted_host) {
             ted.get_or_insert((self.start.to_string(), 0));
         }
 
-        // 3. Sitemaps.
+        // 2. Sitemaps.
         self.sitemaps(sitemap_roots).await;
 
-        // 4. One sample of each discovered feed or JSON URL.
+        // 3. One sample of each discovered feed or JSON URL.
         let mut sampled = HashSet::new();
         for lead in leads {
             if sampled.len() >= MAX_SAMPLES || self.used >= REQUEST_BUDGET {
@@ -204,7 +186,7 @@ impl<S: Source> Probe<'_, S> {
             }
         }
 
-        // 5. TED.
+        // 4. TED.
         if let Some((entry_url, notices)) = ted {
             self.push(ConnectionCandidate {
                 method: ConnectionMethod::Ted,
@@ -223,7 +205,7 @@ impl<S: Source> Probe<'_, S> {
             });
         }
 
-        // 6. HTML fallback, unless the start page was refused and nothing else was found.
+        // 5. HTML fallback, unless the start page was refused and nothing else was found.
         if let Some(failure) = refused
             && self.candidates.is_empty()
         {
@@ -939,20 +921,6 @@ fn robots_sitemaps(body: &str, base: &Url) -> Vec<Url> {
         .collect()
 }
 
-fn known_sources(start: &Url) -> Vec<Lead> {
-    KNOWN_SOURCES
-        .iter()
-        .filter(|(host, _, _)| start.host_str() == Some(host))
-        .filter_map(|(_, method, url)| {
-            Some(Lead {
-                url: Url::parse(url).ok()?,
-                found_via: "known national source",
-                hint: Some(*method),
-            })
-        })
-        .collect()
-}
-
 fn is_ted_host(host: &str) -> bool {
     host == "ted.europa.eu" || host.ends_with(".ted.europa.eu")
 }
@@ -1303,24 +1271,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refused_start_page_still_finds_the_official_api() {
-        let start = "https://www.find-tender.service.gov.uk/Search";
+    async fn refused_start_page_still_reads_the_sitemap() {
+        let start = "https://portal.example/search";
         let source = Canned::default()
             .failure(
                 start,
                 ReadFailure::Incomplete("Portal returned HTTP 403".into()),
             )
             .page(
-                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?limit=20",
-                "application/json",
-                OCDS,
+                "https://portal.example/sitemap.xml",
+                "application/xml",
+                r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+                  <url><loc>https://portal.example/notice/1</loc></url></urlset>"#,
             );
         let candidates = probe_with(&url(start), &source).await.unwrap();
         assert_eq!(
             methods(&candidates),
-            [ConnectionMethod::Ocds, ConnectionMethod::Html]
+            [ConnectionMethod::Sitemap, ConnectionMethod::Html]
         );
-        assert_eq!(candidates[0].found_via, "known national source");
+        assert_eq!(candidates[0].found_via, "/sitemap.xml");
         assert_eq!(candidates[1].http_status, 403);
     }
 
