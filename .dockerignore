@@ -9,3 +9,6 @@ testset
 __pycache__
 
 target
+
+/src/dashboard/node_modules/
+/src/dashboard/elevenlabs-sdk.js

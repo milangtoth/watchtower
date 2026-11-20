@@ -17,11 +17,7 @@
 <link rel="stylesheet" href="/dashboard.css">
 <header class="topbar">
   <div class="brand">
-    <svg class="logo" viewBox="0 0 554 554" role="img" aria-label="Patterno" fill="currentColor">
-      <path d="M152 30A277 277 0 0 1 550 228C310 228 185 170 152 30Z"/>
-      <path d="M152 524A277 277 0 0 0 550 326C310 326 185 384 152 524Z"/>
-      <path d="M52 115C110 210 200 262 300 262H554V292H300C200 292 110 344 52 439A277 277 0 0 1 52 115Z"/>
-    </svg>
+    <span class="logo" aria-hidden="true"><i></i><i></i><i></i></span>
     <h1>Watchtower</h1>
   </div>
   <div class="actions">
@@ -33,17 +29,86 @@
         <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
       </svg>
     </button>
-    <button type="button" class="lang" aria-label="Language: German (coming soon)" title="Language switching is coming soon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>
-      </svg>
-      <span>DE</span>
-    </button>
     <button type="button" id="reload" class="cta" aria-label="Reload dashboard">Reload<span class="wide-only"> dashboard</span></button>
   </div>
 </header>
-<p id="status" role="status">Loading portals…</p>
-<main id="portals"></main>
+<main>
+  <section class="overview" aria-labelledby="overview-title">
+    <div class="overview-copy">
+      <h2 id="overview-title">Portal <span>monitoring</span></h2>
+      <p>Track delivery, review reads and repairs, and inspect published tenders.</p>
+    </div>
+    <section class="assistant-entry" aria-labelledby="assistant-entry-title">
+      <div class="voice-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <div>
+        <h3 id="assistant-entry-title">Tender assistant</h3>
+        <p>Find and compare tenders by voice.</p>
+      </div>
+      <button type="button" id="open-assistant" class="workspace-cta" aria-haspopup="dialog">Open assistant <span aria-hidden="true">→</span></button>
+    </section>
+  </section>
+
+  <section class="portal-section" aria-labelledby="portal-title">
+    <div class="portal-heading">
+      <h2 id="portal-title">Connected portals</h2>
+      <p id="status" role="status">Loading portals…</p>
+    </div>
+    <div id="portals"></div>
+    <p class="portal-empty" id="portal-empty" hidden>Register a public procurement portal with <code>POST /portals</code> to start monitoring it.</p>
+  </section>
+</main>
+<dialog class="assistant-dialog" id="assistant-dialog" aria-labelledby="assistant-title">
+  <header class="assistant-header">
+    <h2 id="assistant-title">Tender assistant</h2>
+    <button type="button" class="assistant-close" id="close-assistant" aria-label="Close assistant" autofocus>×</button>
+  </header>
+  <div class="assistant-body">
+    <section class="voice-panel" aria-labelledby="voice-heading" data-state="idle">
+      <div class="voice-heading">
+        <h3 id="voice-heading">Live voice</h3>
+        <span class="voice-state" id="voice-state" role="status">Ready</span>
+      </div>
+      <div class="voice-stage">
+        <div class="voice-mark voice-mark-large" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <p class="voice-hint" id="voice-hint">Try “Find open IT support tenders in the Netherlands.”</p>
+      </div>
+      <button class="workspace-cta" id="start-call" type="button">Start conversation</button>
+      <div class="in-call-actions" id="call-actions" hidden>
+        <button class="assistant-secondary" id="mute-call" type="button" aria-pressed="false">Mute mic</button>
+        <button class="workspace-cta" id="end-call" type="button">End call</button>
+      </div>
+      <p class="voice-error" id="voice-error" role="alert" hidden></p>
+      <div class="assistant-transcript">
+        <h4 id="transcript-heading">Transcript</h4>
+        <p id="transcript-empty">Spoken messages will appear here.</p>
+        <ol class="transcript-list" id="transcript" role="log" aria-labelledby="transcript-heading"></ol>
+      </div>
+    </section>
+
+    <section class="tenders-panel" aria-labelledby="tenders-heading">
+      <h3 id="tenders-heading">Tender search</h3>
+      <form class="search-form" id="tender-search">
+        <label class="keyword-field">Keyword
+          <input name="query" maxlength="120" placeholder="e.g. IT support" type="search">
+        </label>
+        <label>Country code
+          <input name="country" maxlength="2" pattern="[A-Za-z]{2}" placeholder="e.g. NL" autocomplete="off">
+        </label>
+        <button class="workspace-cta" type="submit">Search</button>
+      </form>
+      <div class="results-heading">
+        <h4>Results</h4>
+        <span id="result-coverage"></span>
+      </div>
+      <div class="results-empty" id="results-empty">
+        <p id="results-message">Results from voice or keyword search will appear here.</p>
+      </div>
+      <p class="search-status" id="search-status" role="status"></p>
+      <ul class="tender-list" id="tender-results"></ul>
+    </section>
+  </div>
+</dialog>
+<script type="module" src="/dashboard/assistant.js"></script>
 <script>
   const show = (parent, tag, text) => {
     const node = document.createElement(tag);
@@ -66,7 +131,7 @@
     card.dataset.state = portal.state;
     show(card, 'h2', portal.url);
     show(card, 'p', portal.state + ' · ' + portal.reason);
-    show(card, 'p', portal.tenderCount + ' open tenders · Last verified ' + date(portal.lastSuccessAt));
+    show(card, 'p', portal.tenderCount + (portal.tenderCount === 1 ? ' open tender' : ' open tenders') + ' · Last verified ' + date(portal.lastSuccessAt));
     const base = '/portals/' + encodeURIComponent(portal.id);
     const details = show(card, 'details', '');
     show(details, 'summary', 'Runs and tenders');
@@ -109,7 +174,8 @@
       const portals = await get('/portals');
       document.querySelector('#portals').replaceChildren();
       portals.forEach(renderPortal);
-      status.textContent = portals.length ? portals.length + ' registered portals' : 'No portals registered';
+      document.querySelector('#portal-empty').hidden = Boolean(portals.length);
+      status.textContent = portals.length === 1 ? '1 registered portal' : portals.length ? portals.length + ' registered portals' : 'No portals registered';
     } catch (error) {
       status.textContent = 'Could not load portals (' + error.message + ')';
     }
