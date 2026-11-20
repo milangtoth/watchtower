@@ -735,7 +735,14 @@ details > section > a::after {
 .tender-list li { padding: .7rem 0; overflow-wrap: anywhere; }
 .tender-list li + li { border-top: 1px solid var(--border-inner); }
 .tender-list p { margin-top: .24rem; }
-.tender-links { display: flex; flex-wrap: wrap; gap: .25rem .65rem; }
+.tender-links { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .65rem; }
+.tender-ref { color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.tender-list li[data-selected] { margin-inline: -.6rem; padding-inline: .6rem; border-radius: var(--radius-inner); background: var(--healing-bg); }
+.tender-list li[data-selected] + li { border-top-color: transparent; }
+.tender-select { margin-left: auto; padding: .15rem .6rem; border: 1px solid var(--border-strong); border-radius: 9999px; background: transparent; color: var(--accent-text); font: inherit; font-size: .75rem; cursor: pointer; }
+.tender-select:hover { background: var(--surface-sunken); }
+.tender-select[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: #fff; }
+.tender-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 @media (max-width: 44rem) {
   .overview { grid-template-columns: 1fr; gap: 1.2rem; padding-block: 2.3rem 1.8rem; }
