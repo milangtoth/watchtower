@@ -220,13 +220,18 @@ function tenderCard(tender) {
 }
 
 function showSearch(payload) {
-  const { results, total, searchedPortals, unavailablePortals, countries, filters } = payload;
+  const { results, total, searchedPortals, unavailablePortals, portalsWithoutData, countries, filters } = payload;
   searchForm.elements.query.value = filters.query;
   searchForm.elements.country.value = filters.country;
   tenderResults.replaceChildren(...results.map(tenderCard));
-  coverage.textContent = searchedPortals === 1 ? "1 portal searched" : searchedPortals + " portals searched";
+  coverage.textContent = [
+    searchedPortals === 1 ? "1 portal searched" : searchedPortals + " portals searched",
+    portalsWithoutData ? portalsWithoutData + " without published data" : "",
+  ].filter(Boolean).join(" · ");
   resultsEmpty.hidden = results.length > 0;
-  if (!searchedPortals) {
+  if (!searchedPortals && portalsWithoutData) {
+    resultsMessage.textContent = "No connected portal has published tenders yet. Check portal status above.";
+  } else if (!searchedPortals) {
     resultsMessage.textContent = "Connect a portal to search its published tenders.";
   } else if (filters.country && !countries.includes(filters.country)) {
     resultsMessage.textContent = "The searched portals have no published tenders marked " + filters.country + ".";
@@ -257,11 +262,13 @@ async function runSearch(input, callSignal) {
     const payload = await searchOpenTenders(input, signal);
     signal.throwIfAborted();
     showSearch(payload);
-    const { total, searchedPortals, unavailablePortals, countries, results } = payload;
+    const { total, searchedPortals, unavailablePortals, portalsWithoutData, portals, countries, results } = payload;
     return {
       total,
       searchedPortals,
       unavailablePortals,
+      portalsWithoutData,
+      portals,
       countries,
       tenders: results.map(tender => ({
         id: tender.id,

@@ -61,10 +61,27 @@ function deadline(tender) {
   return Number.isFinite(timestamp) ? timestamp : Infinity;
 }
 
+function portalName(portal) {
+  try {
+    return new URL(portal.url).hostname;
+  } catch {
+    return portal.url ?? portal.id;
+  }
+}
+
+/** A portal can only be searched once it has published a verified read. */
+function portalSummary(portal, published) {
+  const summary = { name: portalName(portal), state: portal.state, published };
+  if (portal.state !== "serving" && portal.reason) summary.reason = String(portal.reason).slice(0, 200);
+  return summary;
+}
+
 export async function searchOpenTenders(input, signal) {
   const filters = normalizeFilters(input);
   const words = fold(filters.query).match(/[\p{L}\p{N}]+/gu) ?? [];
-  const portals = await readList("/portals", signal);
+  const connected = await readList("/portals", signal);
+  const portals = connected.filter(portal => portal.lastSuccessAt);
+  const portalsWithoutData = connected.filter(portal => !portal.lastSuccessAt).map(portal => portalSummary(portal, false));
   const countries = new Set();
   const results = [];
   let unavailablePortals = 0;
@@ -105,5 +122,7 @@ export async function searchOpenTenders(input, signal) {
     countries: [...countries].sort(),
     searchedPortals: portals.length - unavailablePortals,
     unavailablePortals,
+    portals: [...portals.map(portal => portalSummary(portal, true)), ...portalsWithoutData],
+    portalsWithoutData: portalsWithoutData.length,
   };
 }
