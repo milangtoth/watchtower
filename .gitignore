@@ -11,3 +11,5 @@ data/*
 
 /src/dashboard/node_modules/
 /src/dashboard/elevenlabs-sdk.js
+
+/testset/fixture-portal/out/
