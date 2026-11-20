@@ -79,6 +79,14 @@
           <a class="button button-primary" id="view-portals" href="#directory">View portals <span aria-hidden="true">↓</span></a>
           <a class="button button-secondary" id="view-issues" href="#directory" hidden>View issues</a>
         </div>
+        <section class="assistant-entry" aria-labelledby="assistant-entry-title">
+          <div class="voice-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          <div>
+            <h3 id="assistant-entry-title">Tender assistant</h3>
+            <p>Find and compare tenders by voice.</p>
+          </div>
+          <button type="button" id="open-assistant" class="workspace-cta" aria-haspopup="dialog">Open assistant <span aria-hidden="true">→</span></button>
+        </section>
       </div>
       <aside class="overview-totals" aria-label="Portal delivery totals">
         <div class="overview-stat"><span class="metric-number"><i class="state-dot" aria-hidden="true"></i><span id="serving-metric">—</span></span><span class="metric-label">Portals serving</span></div>
@@ -102,6 +110,58 @@
     <div class="portal-grid" id="portals"></div>
   </section>
 </main>
+<dialog class="assistant-dialog" id="assistant-dialog" aria-labelledby="assistant-title">
+  <header class="assistant-header">
+    <h2 id="assistant-title">Tender assistant</h2>
+    <button type="button" class="assistant-close" id="close-assistant" aria-label="Close assistant" autofocus>×</button>
+  </header>
+  <div class="assistant-body">
+    <section class="voice-panel" aria-labelledby="voice-heading" data-state="idle">
+      <div class="voice-heading">
+        <h3 id="voice-heading">Live voice</h3>
+        <span class="voice-state" id="voice-state" role="status">Ready</span>
+      </div>
+      <div class="voice-stage">
+        <div class="voice-mark voice-mark-large" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <p class="voice-hint" id="voice-hint">Try “Find open IT support tenders in the Netherlands.”</p>
+      </div>
+      <button class="workspace-cta" id="start-call" type="button">Start conversation</button>
+      <div class="in-call-actions" id="call-actions" hidden>
+        <button class="assistant-secondary" id="mute-call" type="button" aria-pressed="false">Mute mic</button>
+        <button class="workspace-cta" id="end-call" type="button">End call</button>
+      </div>
+      <p class="voice-error" id="voice-error" role="alert" hidden></p>
+      <div class="assistant-transcript">
+        <h4 id="transcript-heading">Transcript</h4>
+        <p id="transcript-empty">Spoken messages will appear here.</p>
+        <ol class="transcript-list" id="transcript" role="log" aria-labelledby="transcript-heading"></ol>
+      </div>
+    </section>
+
+    <section class="tenders-panel" aria-labelledby="tenders-heading">
+      <h3 id="tenders-heading">Tender search</h3>
+      <form class="search-form" id="tender-search">
+        <label class="keyword-field">Keyword
+          <input name="query" maxlength="120" placeholder="e.g. IT support" type="search">
+        </label>
+        <label>Country code
+          <input name="country" maxlength="2" pattern="[A-Za-z]{2}" placeholder="e.g. NL" autocomplete="off">
+        </label>
+        <button class="workspace-cta" type="submit">Search</button>
+      </form>
+      <div class="results-heading">
+        <h4>Results</h4>
+        <span id="result-coverage"></span>
+      </div>
+      <div class="results-empty" id="results-empty">
+        <p id="results-message">Results from voice or keyword search will appear here.</p>
+      </div>
+      <p class="search-status" id="search-status" role="status"></p>
+      <ul class="tender-list" id="tender-results"></ul>
+    </section>
+  </div>
+</dialog>
+<script type="module" src="/dashboard/assistant.js"></script>
 <script>
   const byId = id => document.getElementById(id);
   const grid = byId('portals');

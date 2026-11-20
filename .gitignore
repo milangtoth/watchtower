@@ -10,3 +10,8 @@ data/*
 /target/
 /node_modules/
 /storybook-static/
+
+/src/dashboard/node_modules/
+/src/dashboard/elevenlabs-sdk.js
+
+/testset/fixture-portal/out/

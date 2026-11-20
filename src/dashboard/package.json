@@ -1,0 +1,13 @@
+{
+  "name": "watchtower-dashboard",
+  "private": true,
+  "scripts": {
+    "build": "esbuild @elevenlabs/client --bundle --platform=browser --format=esm --minify --outfile=elevenlabs-sdk.js"
+  },
+  "dependencies": {
+    "@elevenlabs/client": "1.37.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

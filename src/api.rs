@@ -111,6 +111,8 @@ pub fn router(api: Api) -> Router {
         .route("/portals/{id}/tenders", get(tenders))
         .route("/portals/{id}/runs", get(runs))
         .route("/files/{id}", get(file))
+        .merge(crate::dashboard::routes())
+        .merge(crate::voice::router())
         .with_state(api)
 }
 
