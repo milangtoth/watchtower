@@ -1,4 +1,4 @@
-import { searchOpenTenders } from "./tender-search.js";
+import { findTender, searchOpenTenders, tenderKey } from "./tender-search.js";
 
 const assistantDialog = document.querySelector('#assistant-dialog');
 const voicePanel = document.querySelector(".voice-panel");
@@ -20,6 +20,11 @@ const coverage = document.querySelector("#result-coverage");
 
 let activeCall;
 let activeSearch;
+// Results currently on screen, numbered from 1, and the one the operator or agent is discussing.
+let shownResults = [];
+let selectedRef = 0;
+
+const DESCRIPTION_LIMIT = 1500;
 
 const voiceLabels = {
   idle: "Ready",
@@ -144,6 +149,11 @@ async function startCall() {
           const result = await runSearch(input ?? {}, call.controller.signal);
           return JSON.stringify(result);
         },
+        get_tender: async input => {
+          if (call !== activeCall || call.ending) return JSON.stringify({ error: "The voice session has ended." });
+          const result = await lookupTender(input ?? {}, call.controller.signal);
+          return JSON.stringify(result);
+        },
       },
     });
 
@@ -196,10 +206,15 @@ function appendLink(container, href, label) {
   container.append(link);
 }
 
-function tenderCard(tender) {
+function tenderCard(tender, index) {
+  const ref = index + 1;
   const card = document.createElement("li");
+  card.dataset.ref = String(ref);
   const heading = document.createElement("h4");
-  heading.textContent = tender.title || "Untitled tender";
+  const number = document.createElement("span");
+  number.className = "tender-ref";
+  number.textContent = ref + ".";
+  heading.append(number, " ", tender.title || "Untitled tender");
   const facts = document.createElement("p");
   const deadline = tender.submissionDeadline?.replace("T", " ");
   facts.textContent = [
@@ -215,14 +230,103 @@ function tenderCard(tender) {
   for (const file of tender.documents ?? []) {
     appendLink(links, safeUrl(file.path, true), file.fileName || "Document");
   }
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "tender-select";
+  select.textContent = "Ask about this";
+  select.setAttribute("aria-pressed", "false");
+  select.addEventListener("click", () => selectTender(selectedRef === ref ? 0 : ref, { announce: true }));
+  links.append(select);
   card.append(heading, facts, links);
   return card;
+}
+
+function selectTender(ref, { announce = false } = {}) {
+  selectedRef = shownResults[ref - 1] ? ref : 0;
+  for (const card of tenderResults.children) {
+    const selected = card.dataset.ref === String(selectedRef);
+    card.toggleAttribute("data-selected", selected);
+    card.querySelector(".tender-select")?.setAttribute("aria-pressed", String(selected));
+  }
+
+  const call = activeCall;
+  if (!announce || !call?.conversation || call.ending) return;
+  const entry = shownResults[selectedRef - 1];
+  call.conversation.sendContextualUpdate(entry
+    ? `The operator selected result ${selectedRef}: "${entry.title || "Untitled tender"}". Questions such as "who is the buyer" now refer to this tender; use get_tender to answer them.`
+    : "The operator cleared the selected tender.");
+}
+
+/** Picks the tender the agent asked about: a result number, a tender ID, the operator's selection, or the only result. */
+function resolveTender({ ref, tender_id: tenderId, portal_id: portalId }) {
+  const number = Number.parseInt(String(ref ?? "").replace(/\D/g, ""), 10);
+  if (number) return shownResults[number - 1] ?? { error: `There is no result ${number} on screen. Results 1 to ${shownResults.length} are shown.` };
+
+  const id = String(tenderId ?? "").trim();
+  if (id) {
+    const shown = shownResults.find(item => item.id === id && (!portalId || item.portal.id === portalId));
+    if (shown) return shown;
+    if (portalId) return { id, portal: { id: String(portalId) }, key: "id:" + id };
+    return { error: "That tender is not among the results on screen. Search for it first." };
+  }
+
+  if (selectedRef) return shownResults[selectedRef - 1];
+  if (shownResults.length === 1) return shownResults[0];
+  return { error: shownResults.length ? "Ask the operator which result number they mean." : "Search for tenders first." };
+}
+
+function tenderDetail(tender, portal, lastSuccessAt, ref) {
+  const description = tender.description?.trim();
+  const place = tender.placeOfPerformance ?? {};
+  const detail = {
+    ref: ref ? String(ref) : undefined,
+    id: tender.id,
+    title: tender.title,
+    buyer: tender.buyerName,
+    status: tender.status,
+    reference: tender.referenceNumber,
+    published: tender.publicationDate,
+    closes: tender.submissionDeadline,
+    procedure: tender.procedureType,
+    nature: tender.contractNature,
+    cpvCodes: tender.cpvCodes,
+    city: place.city,
+    postalCode: place.postalCode,
+    country: place.countryCode,
+    description: description && description.length > DESCRIPTION_LIMIT ? description.slice(0, DESCRIPTION_LIMIT) + "…" : description,
+    descriptionTruncated: description?.length > DESCRIPTION_LIMIT || undefined,
+    documents: (tender.documents ?? []).map(file => ({ name: file.fileName, sizeBytes: file.sizeBytes })),
+    source: safeUrl(tender.url),
+    lastChangedAt: tender.lastChangedAt,
+    portal: { ...portal, lastVerifiedAt: lastSuccessAt },
+  };
+  const expected = { buyer: "buyer", closes: "closing time", description: "description", cpvCodes: "CPV codes", country: "country of performance", reference: "reference number" };
+  detail.notPublished = Object.entries(expected).filter(([field]) => detail[field] == null || detail[field] === "").map(([, label]) => label);
+  return detail;
+}
+
+async function lookupTender(input, callSignal) {
+  const target = resolveTender(input);
+  if (target.error) return { error: target.error };
+  const key = target.key ?? tenderKey(target);
+  if (!key) return { error: "That result has neither an ID nor a source URL to look it up by." };
+
+  try {
+    const { tender, portal, lastSuccessAt } = await findTender(target.portal.id, key, callSignal);
+    const ref = shownResults.indexOf(target) + 1;
+    if (ref) selectTender(ref);
+    return tenderDetail(tender, portal, lastSuccessAt, ref);
+  } catch (error) {
+    return { error: callSignal.aborted ? "The voice session has ended." : error.message };
+  }
 }
 
 function showSearch(payload) {
   const { results, total, searchedPortals, unavailablePortals, portalsWithoutData, countries, filters } = payload;
   searchForm.elements.query.value = filters.query;
   searchForm.elements.country.value = filters.country;
+  shownResults = results;
+  selectedRef = 0;
   tenderResults.replaceChildren(...results.map(tenderCard));
   coverage.textContent = [
     searchedPortals === 1 ? "1 portal searched" : searchedPortals + " portals searched",
@@ -254,6 +358,8 @@ async function runSearch(input, callSignal) {
   const signal = callSignal ? AbortSignal.any([callSignal, search.signal]) : search.signal;
 
   tenderResults.replaceChildren();
+  shownResults = [];
+  selectedRef = 0;
   resultsEmpty.hidden = true;
   coverage.textContent = "";
   searchStatus.textContent = "Searching published tenders…";
@@ -270,7 +376,8 @@ async function runSearch(input, callSignal) {
       portalsWithoutData,
       portals,
       countries,
-      tenders: results.map(tender => ({
+      tenders: results.map((tender, index) => ({
+        ref: String(index + 1),
         id: tender.id,
         title: tender.title,
         buyer: tender.buyerName,

@@ -76,6 +76,29 @@ function portalSummary(portal, published) {
   return summary;
 }
 
+/** Portals identify tenders by source ID, falling back to the notice URL when the source has none. */
+export function tenderKey(tender) {
+  return tender.id ? "id:" + tender.id : tender.url ? "url:" + tender.url : null;
+}
+
+async function readPortal(portalId, signal) {
+  const response = await fetch("/portals/" + encodeURIComponent(portalId), { signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+  if (response.status === 404) throw new Error("That portal is no longer connected.");
+  if (!response.ok) throw new Error("Portal status is unavailable.");
+  return response.json();
+}
+
+/** Reads the current published record for one tender, so answers reflect the latest verified snapshot. */
+export async function findTender(portalId, key, signal) {
+  const [portal, tenders] = await Promise.all([
+    readPortal(portalId, signal),
+    readList("/portals/" + encodeURIComponent(portalId) + "/tenders", signal),
+  ]);
+  const tender = tenders.find(item => tenderKey(item) === key);
+  if (!tender) throw new Error("That tender is no longer in the portal's published data.");
+  return { tender, portal: portalSummary(portal, Boolean(portal.lastSuccessAt)), lastSuccessAt: portal.lastSuccessAt };
+}
+
 export async function searchOpenTenders(input, signal) {
   const filters = normalizeFilters(input);
   const words = fold(filters.query).match(/[\p{L}\p{N}]+/gu) ?? [];
