@@ -148,6 +148,10 @@ pub struct Evidence {
     /// per file and 1 GB expanded per archive. Files within the limits are still delivered.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped_documents: Vec<String>,
+    /// HTML listing rows skipped because they had neither a detail link nor a list field,
+    /// such as a table's header and pagination rows.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_rows: usize,
     /// Listing pages fetched, in order.
     pub listing_pages: Vec<String>,
     /// Pagination-looking links on listing pages that the recipe did not follow.
@@ -383,4 +387,8 @@ pub struct ModelUsage {
     pub input: i64,
     pub cached_input: i64,
     pub output: i64,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
