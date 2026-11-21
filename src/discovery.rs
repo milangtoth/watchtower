@@ -1,28 +1,17 @@
 //! Finding and ordering the ways a portal can be read, before any model call.
 //!
-//! `probe` (owned by David, in `discovery/probe.rs`) makes cheap requests through the portal's
-//! rate-limited client and reports candidate connection methods. `rank` (owned by qwas) orders
-//! them with an embedded scorer; until it lands it is a placeholder that keeps the probe's order.
-
-use crate::domain::ConnectionCandidate;
+//! The probe uses the portal's rate-limited client and the ranker scores its candidate evidence.
 
 mod probe;
+mod rank;
 
 pub use probe::probe;
-
-/// Orders candidates from most to least promising and sets each `score` between 0 and 1.
-///
-/// Placeholder: keeps the probe's candidates, ordered by their existing score.
-pub fn rank(mut candidates: Vec<ConnectionCandidate>) -> Vec<ConnectionCandidate> {
-    candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
-    candidates
-}
+pub use rank::{rank, rank_for};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
-        domain::{ConnectionDecision, ConnectionMethod},
+        domain::{ConnectionCandidate, ConnectionDecision, ConnectionMethod},
         model::top_ranked,
     };
 
@@ -41,12 +30,12 @@ mod tests {
     }
 
     #[test]
-    fn rank_orders_by_score_and_decision_keeps_the_rest_as_fallbacks() {
-        let ranked = rank(vec![
-            candidate(ConnectionMethod::Html, 0.2),
+    fn decision_keeps_the_rest_as_fallbacks() {
+        let ranked = vec![
             candidate(ConnectionMethod::Ocds, 0.9),
             candidate(ConnectionMethod::Feed, 0.5),
-        ]);
+            candidate(ConnectionMethod::Html, 0.2),
+        ];
         let decision = top_ranked(ranked, 1).unwrap();
         assert_eq!(decision.chosen.method, ConnectionMethod::Ocds);
         let fallbacks: Vec<_> = decision.alternatives.iter().map(|c| c.method).collect();

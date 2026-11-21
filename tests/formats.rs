@@ -154,6 +154,7 @@ async fn repair_falls_back_to_the_next_method_after_both_attempts_fail() {
     assert_eq!(portal["reason"], "Last read verified");
     let (method, attempt, rationale) = chosen(&h).await;
     assert_eq!((method, attempt), (Ocds, 2));
+    assert_eq!(h.model.decisions.load(Ordering::SeqCst), 2);
     assert!(
         rationale.starts_with("HTML failed during repair"),
         "{rationale}"

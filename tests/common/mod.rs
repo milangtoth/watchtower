@@ -392,6 +392,7 @@ pub struct Auditor {
     pub recipe: Value,
     pub learns: AtomicUsize,
     pub verifies: AtomicUsize,
+    pub decisions: AtomicUsize,
     /// Connection methods `decide` returns in order, with paths on the fixture. Empty keeps the
     /// default decision for the probed candidates.
     pub connections: Vec<(ConnectionMethod, &'static str)>,
@@ -414,6 +415,7 @@ impl PortalModel for Auditor {
         ctx: &ReasoningContext<'_>,
         ranked: Vec<ConnectionCandidate>,
     ) -> Result<ConnectionDecision, ReadFailure> {
+        self.decisions.fetch_add(1, Ordering::SeqCst);
         if self.connections.is_empty() {
             return top_ranked(ranked, 1);
         }
@@ -433,6 +435,15 @@ impl PortalModel for Auditor {
             })
             .collect();
         top_ranked(candidates, 1)
+    }
+
+    async fn redecide(
+        &self,
+        _: &ReasoningContext<'_>,
+        ranked: Vec<ConnectionCandidate>,
+    ) -> Result<ConnectionDecision, ReadFailure> {
+        self.decisions.fetch_add(1, Ordering::SeqCst);
+        top_ranked(ranked, 1)
     }
 
     async fn verify(
@@ -574,6 +585,7 @@ impl Harness {
             recipe,
             learns: AtomicUsize::new(0),
             verifies: AtomicUsize::new(0),
+            decisions: AtomicUsize::new(0),
             connections,
         });
         let stop = CancellationToken::new();

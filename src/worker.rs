@@ -321,7 +321,8 @@ impl Worker {
             Ok(candidates) => candidates,
             Err(failure) => return Ok(Err(failure)),
         };
-        let mut decision = match self.model.decide(ctx, discovery::rank(candidates)).await {
+        let ranked = discovery::rank_for(ctx.url, candidates);
+        let mut decision = match self.model.decide(ctx, ranked).await {
             Ok(decision) => decision,
             Err(failure) => return Ok(Err(failure)),
         };
@@ -399,13 +400,33 @@ impl Worker {
                 }
                 RepairOutcome::Exhausted => {}
             }
-            if failure.is_temporary()
-                || tried.len() >= MAX_METHODS
-                || decision.alternatives.is_empty()
-            {
+            if failure.is_temporary() || tried.len() >= MAX_METHODS {
                 break;
             }
-            decision = fallback(decision, &failure);
+            let remaining: Vec<_> = decision
+                .alternatives
+                .iter()
+                .filter(|candidate| candidate.is_usable() && !tried.contains(&candidate.method))
+                .cloned()
+                .collect();
+            if remaining.is_empty() {
+                break;
+            }
+            let mut next = match self.model.redecide(ctx, remaining).await {
+                Ok(next) => next,
+                Err(error) => {
+                    failure = error;
+                    break;
+                }
+            };
+            next.attempt = decision.attempt + 1;
+            next.rationale = format!(
+                "{} failed during repair ({}). {}",
+                decision.chosen.method.label(),
+                recipe::sample(&failure.to_string(), 300),
+                next.rationale
+            );
+            decision = next;
             self.store.record_decision(job, &decision).await?;
             tracing::warn!(
                 portal_id = %job.portal_id,
@@ -511,27 +532,6 @@ enum RepairOutcome {
     Blocked(ReadFailure),
     /// Every attempt on this method failed; the failure holds the last reason.
     Exhausted,
-}
-
-/// The next stored alternative as a new decision, without probing again.
-fn fallback(previous: ConnectionDecision, failure: &ReadFailure) -> ConnectionDecision {
-    let mut alternatives = previous.alternatives.into_iter();
-    let chosen = alternatives
-        .next()
-        .expect("fallback needs a stored alternative");
-    ConnectionDecision {
-        rationale: format!(
-            "{} failed during repair ({}). Trying the next ranked method, {}.",
-            previous.chosen.method.label(),
-            recipe::sample(&failure.to_string(), 300),
-            chosen.method.label()
-        ),
-        chosen,
-        alternatives: alternatives.collect(),
-        model: "none (fallback)".into(),
-        decided_at: chrono::Utc::now().to_rfc3339(),
-        attempt: previous.attempt + 1,
-    }
 }
 
 /// Where a recipe attempt failed: while reading the portal, when the read was compared with
