@@ -431,7 +431,15 @@ impl Store {
         }
         let held: i64 = sqlx::query_scalar("UPDATE portals SET tender_count = (SELECT COUNT(*) FROM tenders WHERE portal_id = ? AND generation = ?) WHERE id = ? RETURNING tender_count")
             .bind(&job.portal_id).bind(job.generation).bind(&job.portal_id).fetch_one(&mut *tx).await?;
-        let reason = format!("{note}. {held} tender(s) held, {changed} changed");
+        let changes = match changed {
+            0 => "no changes".to_owned(),
+            1 => "1 changed".to_owned(),
+            count => format!("{count} changed"),
+        };
+        let reason = format!(
+            "{note}. {} held, {changes}",
+            crate::domain::tenders(usize::try_from(held).unwrap_or(0))
+        );
         sqlx::query("UPDATE runs SET finished_at = ?, result = 'ok', reason = ? WHERE id = ?")
             .bind(now.to_rfc3339())
             .bind(reason)
@@ -440,6 +448,27 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Open tenders per portal, counted the way `tenders` would serve them: a serving portal's
+    /// tenders past their deadline count as closed. Dashboard only; portals without open
+    /// tenders are absent.
+    pub async fn open_tender_counts(&self) -> Result<BTreeMap<String, usize>> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT p.id, p.state, t.payload FROM portals p JOIN tenders t ON t.portal_id = p.id AND t.generation = p.generation WHERE p.deleted = 0")
+            .fetch_all(&self.0)
+            .await?;
+        let now = Utc::now();
+        let mut counts = BTreeMap::new();
+        for (id, state, payload) in rows {
+            let mut item: PublishedTender = serde_json::from_str(&payload)?;
+            if state == "serving" {
+                item.tender.close_if_due(now);
+            }
+            if item.tender.status == TenderStatus::Open {
+                *counts.entry(id).or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
     }
 
     pub async fn tenders(

@@ -86,7 +86,12 @@ async fn tender_count_holds_every_tender_and_the_dashboard_shows_the_open_ones()
     let (status, page) = call(&h.app, "GET", "/", None).await;
     assert_eq!(status, StatusCode::OK);
     let page = String::from_utf8(page).unwrap();
-    assert!(page.contains("' tenders held'") && page.contains("tender.status === 'open'"));
+    assert!(page.contains("' tenders held'") && page.contains("/dashboard/open-tenders"));
+    // The open count comes from one dashboard request, counted the way GET /tenders serves.
+    assert_eq!(
+        get_json(&h.app, "/dashboard/open-tenders").await,
+        json!({ h.portal.as_str(): 1 })
+    );
     assert!(
         !page.contains("open tenders"),
         "the dashboard no longer calls every tender open"

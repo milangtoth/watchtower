@@ -237,7 +237,7 @@ function tenderCard(tender, index) {
   }
   const select = document.createElement("button");
   select.type = "button";
-  select.className = "tender-select";
+  select.className = "button button-secondary button-small tender-select";
   select.textContent = "Ask about this";
   select.setAttribute("aria-pressed", "false");
   select.addEventListener("click", () => selectTender(selectedRef === ref ? 0 : ref, { announce: true }));
