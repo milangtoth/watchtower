@@ -7,11 +7,9 @@
 //!    read too (following one `<meta http-equiv="refresh">`). Pages of the GOV.UK publishing
 //!    platform, recognised by their `govuk:` meta tags, offer their Content API JSON twin,
 //! 2. sitemaps from `robots.txt`, `<link rel="sitemap">` or `/sitemap.xml`,
-//! 3. one sample of each discovered feed or JSON URL. When an API or data link leads to an HTML
-//!    page, it is read as API documentation and the same-site endpoints it names are sampled,
-//!    after at most one documentation subpage,
-//! 4. links to TED notices,
-//! 5. the start page as an HTML fallback, which is always offered.
+//! 3. discovered feed or JSON URLs and endpoints named by linked API documentation,
+//! 4. for a thin app shell, verify public GET listing URLs advertised in same-origin bundles,
+//! 5. links to TED notices as evidence, and the usual HTML fallback when discovery succeeds.
 //!
 //! Detection is generic: there are no per-portal rules, only platform conventions, so nothing
 //! depends on which portals are in the test set. Every request goes through the portal's rate-limited client. A login or
@@ -27,6 +25,8 @@ use reqwest::Url;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
+
+mod bundles;
 
 /// The most requests one probe makes, redirects excluded (the client limits those).
 pub(crate) const REQUEST_BUDGET: usize = 12;
@@ -96,9 +96,23 @@ pub async fn probe(
 /// Where probe requests go. `PortalHttp` in production; canned responses in tests.
 pub(crate) trait Source {
     async fn sample(&self, url: Url) -> Result<Sample, ReadFailure>;
+    async fn scoped_sample(
+        &self,
+        url: Url,
+        limit: usize,
+        prefix: bool,
+    ) -> Result<Sample, ReadFailure>;
 }
 
 impl Source for PortalHttp {
+    async fn scoped_sample(
+        &self,
+        url: Url,
+        limit: usize,
+        prefix: bool,
+    ) -> Result<Sample, ReadFailure> {
+        PortalHttp::scoped_sample(self, url, limit, prefix).await
+    }
     async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
         PortalHttp::sample(self, url).await
     }
@@ -151,6 +165,7 @@ impl<S: Source> Probe<'_, S> {
         let mut sitemap_roots = Vec::new();
         let mut ted = None;
         let mut refused = None;
+        let mut shell = None;
 
         // 1. Start page.
         match self.fetch(self.start.clone()).await {
@@ -164,6 +179,7 @@ impl<S: Source> Probe<'_, S> {
                         fallback.sample_items = page.notice_links;
                         fallback.fields_seen = page.fields.clone();
                         fallback.has_pagination = page.has_next;
+                        shell = page.shell;
                         if page.govuk
                             && let Some(url) = govuk_content_api(&sample.url)
                         {
@@ -227,6 +243,18 @@ impl<S: Source> Probe<'_, S> {
             }
         }
 
+        // Only sample JavaScript when the start page is an application shell.
+        let mut post_search = false;
+        if let Some(shell) = &shell {
+            match self.bundle_listings(shell, &sampled).await {
+                Ok(post) => post_search = post,
+                Err(err) if !self.candidates.iter().any(ConnectionCandidate::is_usable) => {
+                    return Err(err);
+                }
+                Err(_) => {} // Stop sampling and keep the usable route already found.
+            }
+        }
+
         // 4. TED.
         if let Some((entry_url, notices)) = ted {
             self.push(ConnectionCandidate {
@@ -252,8 +280,82 @@ impl<S: Source> Probe<'_, S> {
         {
             return Err(failure);
         }
+        if shell.is_some() && !self.candidates.iter().any(ConnectionCandidate::is_usable) {
+            let reason = if post_search {
+                "The JavaScript app shell exposes a search that cannot be read with GET. POST search is unsupported"
+            } else {
+                "The JavaScript app shell exposed no verified public GET listing. Searches requiring POST are unsupported"
+            };
+            return Err(ReadFailure::Incomplete(reason.into()));
+        }
         self.push(fallback);
         Ok(self.candidates)
+    }
+
+    async fn bundle_listings(
+        &mut self,
+        shell: &bundles::Shell,
+        sampled: &HashSet<Url>,
+    ) -> Result<bool, ReadFailure> {
+        let mut routes = bundles::Routes::default();
+        for url in &shell.scripts {
+            if self.used + bundles::MAX_ENDPOINTS >= REQUEST_BUDGET {
+                break;
+            }
+            self.used += 1;
+            match self
+                .source
+                .scoped_sample(url.clone(), bundles::SAMPLE_BYTES, true)
+                .await
+            {
+                Ok(bundle) => routes.inspect(&bundle.body, &shell.base, &shell.page),
+                Err(err @ ReadFailure::Throttled { .. }) => return Err(err),
+                Err(err) if http_status(&err) == Some(429) => return Err(err),
+                Err(_) => continue,
+            }
+        }
+        let mut post_search = routes.post_search;
+        for url in routes
+            .best()
+            .filter(|url| !sampled.contains(url))
+            .take(bundles::MAX_ENDPOINTS)
+        {
+            if self.used >= REQUEST_BUDGET {
+                break;
+            }
+            self.used += 1;
+            let sample = match self
+                .source
+                .scoped_sample(url, bundles::SAMPLE_BYTES, false)
+                .await
+            {
+                Ok(sample) => sample,
+                Err(err @ ReadFailure::Throttled { .. }) => return Err(err),
+                Err(err) if http_status(&err) == Some(429) => return Err(err),
+                Err(err) => {
+                    post_search |= http_status(&err) == Some(405);
+                    continue;
+                }
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&sample.body) else {
+                continue;
+            };
+            if value.get("errors").is_some() && value.get("data").is_none_or(Value::is_null) {
+                continue;
+            }
+            if let Some(listing) = json_listing(&value)
+                && listing.items > 0
+                && !listing.fields.is_empty()
+            {
+                self.push_parsed(
+                    &sample,
+                    Parsed::Listing(listing),
+                    "app-shell bundle GET",
+                    None,
+                );
+            }
+        }
+        Ok(post_search)
     }
 
     /// Reads the site's home page when the start page offers no machine links, as with a
@@ -883,6 +985,7 @@ fn feed_listing(body: &str) -> Option<Listing> {
 /// What the start page's HTML offers.
 #[derive(Debug, Default)]
 struct HtmlPage {
+    shell: Option<bundles::Shell>,
     leads: Vec<Lead>,
     sitemaps: Vec<(Url, &'static str)>,
     /// The first linked TED notice and how many distinct TED notices are linked.
@@ -1037,6 +1140,9 @@ fn inspect_html(base: &Url, body: &str) -> HtmlPage {
         {
             page.refresh = Some(url);
         }
+    }
+    if page.notice_links == 0 {
+        page.shell = bundles::scripts(&document, base);
     }
     page.govuk = document.select(&selector("meta[name]")).any(|meta| {
         meta.value()
@@ -1337,6 +1443,9 @@ mod tests {
     }
 
     impl Source for Canned {
+        async fn scoped_sample(&self, url: Url, _: usize, _: bool) -> Result<Sample, ReadFailure> {
+            self.sample(url).await
+        }
         async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
             self.requests.lock().unwrap().push(url.to_string());
             match self.pages.get(url.as_str()) {
@@ -1589,6 +1698,54 @@ mod tests {
         assert_eq!(
             html.fields_seen,
             ["title", "deadline", "buyer", "publicationDate", "documents"]
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_error_and_metadata_objects_and_caps_endpoint_samples() {
+        let start = "https://portal.example/";
+        let source = Canned::default()
+            .page(
+                start,
+                "text/html",
+                r#"<div id="app"></div><script src="/main.js"></script>"#,
+            )
+            .page(
+                "https://portal.example/main.js",
+                "application/javascript",
+                r#"
+                fetch('/api/notices/a'); fetch('/api/notices/b');
+                fetch('/api/notices/c'); fetch('/api/notices/d');
+            "#,
+            )
+            .page(
+                "https://portal.example/api/notices/a",
+                "application/json",
+                r#"{"data":null,"errors":[{"id":"E"}]}"#,
+            )
+            .page(
+                "https://portal.example/api/notices/b",
+                "application/json",
+                r#"{"id":"config","title":"Portal"}"#,
+            )
+            .failure(
+                "https://portal.example/api/notices/c",
+                ReadFailure::Incomplete("Portal returned HTTP 405".into()),
+            );
+        let error = probe_with(&url(start), &source).await.unwrap_err();
+        let requests = source.requested();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|u| u.contains("/api/notices/"))
+                .count(),
+            3
+        );
+        assert!(!requests.iter().any(|u| u.ends_with("/d")));
+        assert!(requests.len() <= REQUEST_BUDGET);
+        assert!(
+            error.to_string().contains("POST search is unsupported"),
+            "{error}"
         );
     }
 
@@ -1934,6 +2091,171 @@ mod tests {
                 flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             encoder.write_all(body.as_bytes()).unwrap();
             encoder.finish().unwrap()
+        }
+
+        #[tokio::test]
+        async fn app_shell_bundle_supplies_a_ranked_json_route() {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = calls.clone();
+            let router = Router::new()
+                .route(
+                    "/",
+                    get(|| async {
+                        axum::response::Html(include_str!("../../tests/fixtures/spa/shell.html"))
+                    }),
+                )
+                .route(
+                    "/portal/main.js",
+                    get(|| async {
+                        (
+                            [(header::CONTENT_TYPE, "application/javascript")],
+                            include_str!("../../tests/fixtures/spa/main.js"),
+                        )
+                    }),
+                )
+                .route(
+                    "/portal/api/notices/search",
+                    get(|| async {
+                        (
+                            [(header::CONTENT_TYPE, "application/json")],
+                            include_str!("../../tests/fixtures/spa/notices.json"),
+                        )
+                    }),
+                )
+                .layer(axum::middleware::from_fn(
+                    move |req: axum::extract::Request, next: axum::middleware::Next| {
+                        seen.lock().unwrap().push((
+                            req.method().clone(),
+                            req.uri().to_string(),
+                            std::time::Instant::now(),
+                        ));
+                        async move { next.run(req).await }
+                    },
+                ));
+            let base = serve(router).await;
+            let start = url(&base);
+            let files = tempfile::tempdir().unwrap();
+            let http = Fetcher::new(files.path().into()).unwrap().portal(&start);
+            let ranked = crate::discovery::rank_for(&start, probe(&start, &http).await.unwrap());
+            let decision = crate::model::top_ranked(ranked, 1).unwrap();
+            let chosen = decision.chosen;
+            assert_eq!(
+                chosen.entry_url,
+                format!("{base}/portal/api/notices/search?page=1&limit=5")
+            );
+            assert_eq!(chosen.method, ConnectionMethod::Json);
+            assert!(chosen.score > 0.0 && chosen.has_pagination);
+            assert_eq!(chosen.found_via, "app-shell bundle GET");
+            assert_eq!((chosen.http_status, chosen.sample_items), (200, 2));
+            assert_eq!(chosen.fields_seen, ["title", "deadline", "buyer", "id"]);
+            let calls = calls.lock().unwrap();
+            assert!(calls.iter().all(|(method, path, _)| method == "GET"
+                && !path.contains("advanced")
+                && !path.contains("settings")));
+            assert!(
+                calls
+                    .windows(2)
+                    .all(|pair| pair[1].2.duration_since(pair[0].2)
+                        >= std::time::Duration::from_millis(900))
+            );
+        }
+
+        #[tokio::test]
+        async fn post_only_shell_reports_the_unsupported_method() {
+            let router = Router::new()
+                .route(
+                    "/",
+                    get(|| async {
+                        axum::response::Html(
+                            r#"<div id="app"></div><script src="/main.js"></script>"#,
+                        )
+                    }),
+                )
+                .route(
+                    "/main.js",
+                    get(|| async { "client.post('/api/notices/search', filters)" }),
+                );
+            let start = url(&serve(router).await);
+            let files = tempfile::tempdir().unwrap();
+            let http = Fetcher::new(files.path().into()).unwrap().portal(&start);
+            let error = probe(&start, &http).await.unwrap_err();
+            assert!(
+                error.to_string().contains("POST search is unsupported"),
+                "{error}"
+            );
+        }
+
+        #[tokio::test]
+        async fn scoped_samples_bound_bodies_and_stop_cross_origin_redirects() {
+            use axum::response::Redirect;
+            let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = hits.clone();
+            let other = serve(Router::new().route(
+                "/",
+                get(move || async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    "unexpected request"
+                }),
+            ))
+            .await;
+            let base = serve(
+                Router::new()
+                    .route("/bundle", get(|| async { "0123456789" }))
+                    .route("/gzip", get(|| async { gzip(&"z".repeat(1000)) }))
+                    .route(
+                        "/redirect",
+                        get(move || async move { Redirect::temporary(&other) }),
+                    ),
+            )
+            .await;
+            let files = tempfile::tempdir().unwrap();
+            let http = Fetcher::new(files.path().into())
+                .unwrap()
+                .with_cache(files.path().join("scope-cache"))
+                .unwrap()
+                .portal(&url(&base));
+            assert_eq!(
+                http.scoped_sample(url(&format!("{base}/bundle")), 4, true)
+                    .await
+                    .unwrap()
+                    .body,
+                "0123"
+            );
+            assert!(
+                http.scoped_sample(url(&format!("{base}/bundle")), 4, false)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                http.scoped_sample(url(&format!("{base}/gzip")), 64, true)
+                    .await
+                    .unwrap()
+                    .body
+                    .len(),
+                64
+            );
+            assert!(
+                http.scoped_sample(url(&format!("{base}/redirect")), 64, true)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+            // A truncated sample must not replace a complete response in the development cache.
+            assert_eq!(
+                http.page(url(&format!("{base}/bundle")))
+                    .await
+                    .unwrap()
+                    .body,
+                "0123456789"
+            );
+            // A redirect chain cached by an ordinary read still has to obey bundle scope.
+            http.page(url(&format!("{base}/redirect"))).await.unwrap();
+            assert!(
+                http.scoped_sample(url(&format!("{base}/redirect")), 64, true)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
 
         #[tokio::test]

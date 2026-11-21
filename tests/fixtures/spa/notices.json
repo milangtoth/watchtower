@@ -1,0 +1,1 @@
+{"items":[{"id":"N1","title":"Bridge inspection","buyer":"City","deadline":"2027-01-20"},{"id":"N2","title":"Road survey","buyer":"County","deadline":"2027-02-01"}],"total":8,"next":"/portal/api/notices/search?page=2&limit=5"}
