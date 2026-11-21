@@ -74,9 +74,7 @@ def normalized_url(url):
 
 
 def usable_candidate(candidate):
-    return 200 <= candidate["httpStatus"] < 300 or (
-        candidate["method"] == "ted" and candidate["httpStatus"] == 0
-    )
+    return candidate["method"] != "ted" and 200 <= candidate["httpStatus"] < 300
 
 
 def is_labelled_candidate(row, candidate):

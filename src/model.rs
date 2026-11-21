@@ -61,15 +61,20 @@ pub trait PortalModel: Send + Sync {
     }
 }
 
-/// A decision for the first of `ranked`, with the rest as alternatives and no model involved.
+/// A decision for the first usable candidate of `ranked`, with the rest, in order, as
+/// alternatives and no model involved. Unusable candidates, such as TED, are kept as evidence
+/// but never chosen.
 pub fn top_ranked(
-    ranked: Vec<ConnectionCandidate>,
+    mut ranked: Vec<ConnectionCandidate>,
     attempt: u32,
 ) -> Result<ConnectionDecision, ReadFailure> {
-    let mut candidates = ranked.into_iter();
-    let chosen = candidates.next().ok_or_else(|| {
-        ReadFailure::Incomplete("Probing found no usable way to read this portal".into())
-    })?;
+    let index = ranked
+        .iter()
+        .position(ConnectionCandidate::is_usable)
+        .ok_or_else(|| {
+            ReadFailure::Incomplete("Probing found no usable way to read this portal".into())
+        })?;
+    let chosen = ranked.remove(index);
     Ok(ConnectionDecision {
         rationale: format!(
             "Highest-ranked candidate: {} at {}",
@@ -77,7 +82,7 @@ pub fn top_ranked(
             chosen.entry_url
         ),
         chosen,
-        alternatives: candidates.collect(),
+        alternatives: ranked,
         model: "none (top-ranked)".into(),
         decided_at: chrono::Utc::now().to_rfc3339(),
         attempt,
@@ -241,7 +246,10 @@ Allowed recipe fields:
 - nested_document_pages: optional links within attachment pages that lead to another attachment
   page. Use this for an HTML intermediary that points onward to the files. Traversal allows up to
   three intermediate pages in depth. document_format defaults to html for all attachment pages.
-- timezone: optional IANA timezone from the portal's locale if deadlines use local time.
+- timezone: IANA timezone of the portal's locale when deadlines are written in local time without an
+  offset. Set it whenever the portal's country is clear; otherwise the country domain decides.
+- buyer_labels: optional lowercase labels that name the buyer in a detail page's definition list when
+  the portal uses its own wording, such as ["from"]. Use detail_fields.buyerName when a selector works.
   date_format and deadline_format: optional strftime formats.
 A selection is {"path":"CSS selector or JSON pointer","attribute":"href or other HTML attribute"}.
 Omit attribute for HTML text or JSON values. An empty path selects the current node.

@@ -156,6 +156,11 @@ pub struct Evidence {
     /// Every same-origin link on the HTML listing pages, compared with the last verified read.
     #[serde(skip)]
     pub listing_links: HashSet<String>,
+    /// The read asked only for releases from a recent start date on, so it leaves out open
+    /// tenders not updated since. Publication then closes tenders only by deadline or by a
+    /// status the source reports, not because they are missing from the read.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub windowed: bool,
 }
 
 /// How Watchtower reads a portal. Probing finds candidates, ranking orders them, and the model
@@ -183,6 +188,12 @@ impl ConnectionMethod {
             Self::Ted => "TED",
         }
     }
+
+    /// Whether Watchtower has a reader for this method. TED has none yet, and its search
+    /// needs POST, so the probe reports it as evidence but it is never chosen.
+    pub fn has_reader(self) -> bool {
+        self != Self::Ted
+    }
 }
 
 /// One way to read a portal, found by probing without the model.
@@ -206,10 +217,10 @@ pub struct ConnectionCandidate {
 }
 
 impl ConnectionCandidate {
-    /// TED can be discovered from a notice link without a sampled HTTP response.
+    /// A candidate can be chosen or used as a fallback when a reader exists for its method and
+    /// the probe sampled it successfully. Unusable candidates stay in the decision as evidence.
     pub fn is_usable(&self) -> bool {
-        (200..300).contains(&self.http_status)
-            || (self.method == ConnectionMethod::Ted && self.http_status == 0)
+        self.method.has_reader() && (200..300).contains(&self.http_status)
     }
 }
 
