@@ -2,8 +2,9 @@ use crate::{
     db::{Job, OutageLimit, Store},
     discovery,
     domain::{
-        CandidateRead, ConnectionDecision, ConnectionMethod, FieldChange, MovedFile,
-        PublishedTender, ReadFailure, Review, StoredEvidence, Tender, TenderStatus, TenderSummary,
+        CandidateRead, ConnectionCandidate, ConnectionDecision, ConnectionMethod, FieldChange,
+        MovedFile, PublishedTender, ReadFailure, Review, StoredEvidence, Tender, TenderStatus,
+        TenderSummary,
     },
     fetch::Fetcher,
     model::{PortalModel, ReasoningContext},
@@ -278,9 +279,10 @@ impl Worker {
             MethodsOutcome::Failed { failure, .. } if failure.is_temporary() => {
                 self.defer(job, &run_id, &failure).await
             }
-            MethodsOutcome::Failed { tried, .. } => {
+            MethodsOutcome::Failed { tried, skipped, .. } => {
+                let reason = with_skips(attach_reason(&tried), &skipped);
                 self.store
-                    .fail(job, &run_id, &attach_reason(&tried), self.recovery.recheck)
+                    .fail(job, &run_id, &reason, self.recovery.recheck)
                     .await
             }
         }
@@ -448,7 +450,7 @@ impl Worker {
                 Mode::Repair(&broke),
             )
             .await?;
-        let (tried, failure) = match outcome {
+        let (tried, failure, skipped) = match outcome {
             MethodsOutcome::Published | MethodsOutcome::Removed => return Ok(()),
             MethodsOutcome::Blocked(error) => {
                 return self
@@ -456,7 +458,11 @@ impl Worker {
                     .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
                     .await;
             }
-            MethodsOutcome::Failed { tried, failure } => (tried, failure),
+            MethodsOutcome::Failed {
+                tried,
+                failure,
+                skipped,
+            } => (tried, failure, skipped),
         };
         if failure.is_temporary() {
             return self.defer(job, &run_id, &failure).await;
@@ -475,6 +481,7 @@ impl Worker {
         } else {
             format!("Repair did not restore delivery: {failure}")
         };
+        let reason = with_skips(reason, &skipped);
         self.store.fail(job, &run_id, &reason, retry_in).await
     }
 
@@ -519,11 +526,14 @@ impl Worker {
     ) -> Result<MethodsOutcome> {
         let job = ctx.job;
         let mut tried: Vec<TriedMethod> = Vec::new();
+        // Fallbacks passed over because the probe saw no items and no pagination on them.
+        let mut skipped: Vec<String> = Vec::new();
         loop {
             let run = MethodRun {
                 id: run_id,
                 mode,
                 tried: &tried,
+                skipped: &skipped,
             };
             let last = match self
                 .try_method(ctx, &run, &mut recipe, &mut failure, snapshot, &decision)
@@ -542,6 +552,7 @@ impl Worker {
                 return Ok(MethodsOutcome::Failed {
                     tried,
                     failure: last,
+                    skipped,
                 });
             }
             let remaining: Vec<_> = decision
@@ -555,10 +566,18 @@ impl Worker {
                 })
                 .cloned()
                 .collect();
+            let (remaining, bare) = prefer_evidenced(remaining);
+            let newly_skipped: Vec<String> = bare
+                .iter()
+                .map(|candidate| format!("{} at {}", candidate.method.label(), candidate.entry_url))
+                .filter(|label| !skipped.contains(label))
+                .collect();
+            skipped.extend(newly_skipped.iter().cloned());
             if remaining.is_empty() {
                 return Ok(MethodsOutcome::Failed {
                     tried,
                     failure: last,
+                    skipped,
                 });
             }
             let mut next = match self.model.redecide(ctx, remaining).await {
@@ -567,10 +586,12 @@ impl Worker {
                     return Ok(MethodsOutcome::Failed {
                         tried,
                         failure: error,
+                        skipped,
                     });
                 }
             };
-            // Unusable candidates, such as TED, stay in the recorded evidence.
+            // Unusable candidates, such as TED, stay in the recorded evidence, and skipped ones
+            // stay available in case nothing better is left later.
             next.alternatives.extend(
                 decision
                     .alternatives
@@ -578,13 +599,17 @@ impl Worker {
                     .filter(|candidate| !candidate.is_usable())
                     .cloned(),
             );
+            next.alternatives.extend(bare);
             next.attempt = decision.attempt + 1;
-            next.rationale = format!(
-                "{} failed during {} ({}). {}",
-                decision.chosen.method.label(),
-                mode.as_str(),
-                recipe::sample(&last.to_string(), 300),
-                next.rationale
+            next.rationale = with_skips(
+                format!(
+                    "{} failed during {} ({}). {}",
+                    decision.chosen.method.label(),
+                    mode.as_str(),
+                    recipe::sample(&last.to_string(), 300),
+                    next.rationale
+                ),
+                &newly_skipped,
             );
             self.store.record_decision(job, &next).await?;
             tracing::warn!(
@@ -595,11 +620,14 @@ impl Worker {
                 "Falling back to the next connection method"
             );
             if mode.is_attach() {
-                let reason = format!(
-                    "{} failed: {}. Trying {}",
-                    decision.chosen.method.label(),
-                    recipe::sample(&last.to_string(), 300),
-                    next.chosen.method.label()
+                let reason = with_skips(
+                    format!(
+                        "{} failed: {}. Trying {}",
+                        decision.chosen.method.label(),
+                        recipe::sample(&last.to_string(), 300),
+                        next.chosen.method.label()
+                    ),
+                    &newly_skipped,
                 );
                 match self.store.begin_fallback(job, run_id, &reason).await? {
                     Some(id) => *run_id = id,
@@ -616,7 +644,7 @@ impl Worker {
     }
 
     /// Learns and checks recipes for one connection method: twice, or once for a preset that
-    /// would produce the same recipe again. Publishes on success. Learning starts from
+    /// would produce the same recipe again or when learning finds the method unsupported. Publishes on success. Learning starts from
     /// `recipe` and `failure` when both are known. Empty first reads require source evidence.
     async fn try_method(
         &self,
@@ -640,6 +668,11 @@ impl Worker {
             let learned = match self.learn(ctx, previous, decision).await {
                 Ok(learned) => recipe.insert(learned),
                 Err(error @ ReadFailure::Blocked(_)) => return Ok(MethodOutcome::Blocked(error)),
+                // A method the model found unsupported would only give the same answer again
+                // for more model calls.
+                Err(error @ ReadFailure::Unsupported(_)) => {
+                    return Ok(MethodOutcome::Exhausted(error));
+                }
                 Err(error) if error.is_temporary() => return Ok(MethodOutcome::Exhausted(error)),
                 Err(error) => {
                     *failure = Some(error);
@@ -836,6 +869,8 @@ struct MethodRun<'a> {
     id: &'a String,
     mode: Mode<'a>,
     tried: &'a [TriedMethod],
+    /// Fallbacks skipped so far for lack of probe evidence.
+    skipped: &'a [String],
 }
 
 impl MethodRun<'_> {
@@ -846,7 +881,7 @@ impl MethodRun<'_> {
         recipe: &Recipe,
         decision: &ConnectionDecision,
     ) -> String {
-        match self.mode {
+        let note = match self.mode {
             Mode::Repair(broke) => repair_note(previous, recipe, decision, broke),
             Mode::Attach if self.tried.is_empty() => "Attached and verified".to_owned(),
             Mode::Attach => {
@@ -861,7 +896,8 @@ impl MethodRun<'_> {
                     failed.join(" and ")
                 )
             }
-        }
+        };
+        with_skips(note, self.skipped)
     }
 }
 
@@ -882,7 +918,37 @@ enum MethodsOutcome {
     Failed {
         tried: Vec<TriedMethod>,
         failure: ReadFailure,
+        /// Fallbacks skipped for lack of probe evidence.
+        skipped: Vec<String>,
     },
+}
+
+/// Splits fallback candidates into those the probe sampled items or pagination on, in their
+/// order, and the bare rest. Learning a bare candidate mostly pays for the model to find an
+/// empty page, so bare candidates are tried only when nothing else is left.
+fn prefer_evidenced(
+    candidates: Vec<ConnectionCandidate>,
+) -> (Vec<ConnectionCandidate>, Vec<ConnectionCandidate>) {
+    let (evidenced, bare): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|candidate| candidate.sample_items > 0 || candidate.has_pagination);
+    if evidenced.is_empty() {
+        (bare, Vec::new())
+    } else {
+        (evidenced, bare)
+    }
+}
+
+/// Appends the fallbacks skipped for lack of probe evidence to a run reason.
+fn with_skips(reason: String, skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        return reason;
+    }
+    format!(
+        "{}. Skipped {}: the probe sampled no items or pagination there",
+        reason.trim_end_matches('.'),
+        skipped.join(", ")
+    )
 }
 
 /// A connection method that did not deliver, with its last failure.
