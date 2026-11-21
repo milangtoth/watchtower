@@ -462,3 +462,91 @@ async fn login_wall_on_attach_fails_at_once_without_falling_back() {
     assert_eq!(run_history(&h.runs().await), ["read=failed"]);
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_method_declared_unsupported_costs_one_learn_call_before_falling_back() {
+    let h = Harness::attach_faked(
+        Layout::two_pages(),
+        vec![(Sitemap, "/sitemap.xml"), (Feed, "/feed.xml")],
+        vec![(Feed, feed_recipe())],
+        Fakes {
+            unsupported: vec![Sitemap],
+            ..Fakes::default()
+        },
+    )
+    .await;
+    h.observe("attach-unsupported").await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "serving", "{portal}");
+    assert_fixture_tenders(&h).await;
+    assert_eq!(chosen(&h).await.0, Feed);
+    assert_eq!(
+        h.model.learns.load(Ordering::SeqCst),
+        2,
+        "one learn call for the unsupported sitemap, one for the feed"
+    );
+    let reasons = run_reasons(&h).await;
+    assert!(
+        reasons[0].starts_with(
+            "Sitemap failed: Learning stopped after 1 model call(s), method unsupported"
+        ),
+        "{reasons:?}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_fallback_without_probe_evidence_is_skipped_unless_it_is_the_last() {
+    // HTML at "/" would read the fixture, but its probe sample showed no items or pagination,
+    // so the feed is tried first.
+    let h = Harness::attach_faked(
+        Layout::two_pages(),
+        vec![(Sitemap, "/sitemap.xml"), (Html, "/"), (Feed, "/feed.xml")],
+        vec![(Sitemap, empty_sitemap_recipe()), (Feed, feed_recipe())],
+        Fakes {
+            bare: vec!["/"],
+            ..Fakes::default()
+        },
+    )
+    .await;
+    h.observe("attach-skip-bare").await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "serving", "{portal}");
+    let (method, attempt, rationale) = chosen(&h).await;
+    assert_eq!((method, attempt), (Feed, 2));
+    assert!(rationale.contains("Skipped HTML at "), "{rationale}");
+    assert_eq!(
+        h.model.learns.load(Ordering::SeqCst),
+        3,
+        "two sitemap attempts and one feed attempt, none for the bare HTML candidate"
+    );
+    let reasons = run_reasons(&h).await;
+    assert!(
+        reasons[0].starts_with(
+            "Sitemap failed: Sitemap read found no tenders. Trying Feed. Skipped HTML at "
+        ),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons[0].contains("the probe sampled no items or pagination there"),
+        "{reasons:?}"
+    );
+    h.shutdown().await;
+
+    // When the bare candidate is the only one left, it is still tried.
+    let h = Harness::attach_faked(
+        Layout::two_pages(),
+        vec![(Sitemap, "/sitemap.xml"), (Html, "/")],
+        vec![(Sitemap, empty_sitemap_recipe())],
+        Fakes {
+            bare: vec!["/"],
+            ..Fakes::default()
+        },
+    )
+    .await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "serving", "{portal}");
+    assert_eq!(chosen(&h).await.0, Html);
+    assert_fixture_tenders(&h).await;
+    h.shutdown().await;
+}
