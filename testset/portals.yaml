@@ -44,6 +44,17 @@ portals:
     readiness: five-public-downloads-verified
     note: The marketing pages repeated eight featured notices. The public Satellite table returned two distinct pages, with notice type, buyer, publication date, deadline and project links. The separate source baseline verifies five downloads.
     evidence: dtvp-baseline.json
+    open_listing_route: >-
+      Checked 2026-11-21 with spaced read-only requests. The welcome table mixes every notice type
+      (338 pages, 6751 entries; its next and last links are plain hrefs). The "Alle Bekanntmachungen"
+      page has a public search form (POST to categoryOverview.do?method=searchExtended) with a
+      publication type checkbox selectedPublicationTypes=Tender. The same filter works as a GET:
+      /Satellite/company/announcements/categoryOverview.do?method=searchExtended&selectedPublicationTypes=Tender
+      shows "Seite 1 von 124 - Gesamteinträge 2478", calls for tenders only. Its next and last links
+      sit in onclick="setTargetAndSubmit('/Satellite/common/project/search.do?method=showTable&fromSearch=1&selectedTablePagePROJECT_RESULT=2')"
+      and page through the session: with the JSESSIONID cookie page 2 shows new rows; adding the
+      page parameter to the GET search instead repeats page 1's rows. No page size control or feed
+      is exposed.
 
   - name: Ireland eTenders
     url: https://www.etenders.gov.ie/epps/prepareCurrentOpportunities.do?currentType=cft
@@ -157,6 +168,11 @@ portals:
     entry_url: https://vergabe.niedersachsen.de/Satellite/company/welcome.do
     readiness: needs-five-download-baseline
     note: Two distinct public result pages expose the notice title, buyer, publication date, bid deadline and project links.
+    open_listing_route: >-
+      Checked 2026-11-21. Same software as DTVP. The welcome table has 101 pages (2020 entries, all
+      notice types). The GET search filter
+      /Satellite/company/announcements/categoryOverview.do?method=searchExtended&selectedPublicationTypes=Tender
+      shows 18 pages (348 entries), paged through onclick links and the session cookie.
 
   - name: Plzeň Region E-ZAK
     url: https://ezak.cnpk.cz/contract_index.html?direction=asc&orderby=name&page=1&state=OFFERS&type=all
