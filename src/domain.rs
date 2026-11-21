@@ -148,6 +148,10 @@ pub struct Evidence {
     /// per file and 1 GB expanded per archive. Files within the limits are still delivered.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped_documents: Vec<String>,
+    /// HTML listing rows skipped because they had neither a detail link nor a list field,
+    /// such as a table's header and pagination rows.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_rows: usize,
     /// Listing pages fetched, in order.
     pub listing_pages: Vec<String>,
     /// Pagination-looking links on listing pages that the recipe did not follow.
@@ -308,6 +312,10 @@ pub struct CandidateRead {
 pub enum ReadFailure {
     Blocked(String),
     Incomplete(String),
+    /// Learning concluded that the chosen connection method cannot deliver this portal's open
+    /// tenders, for example an empty app shell or a page with only search forms. Learning that
+    /// method again would cost model calls for the same answer, so the worker moves on.
+    Unsupported(String),
     Temporary(String),
     /// A temporary failure where the portal said how long to wait, via `Retry-After`.
     Throttled {
@@ -346,6 +354,7 @@ impl std::fmt::Display for ReadFailure {
         match self {
             Self::Blocked(reason)
             | Self::Incomplete(reason)
+            | Self::Unsupported(reason)
             | Self::Temporary(reason)
             | Self::Throttled { reason, .. } => f.write_str(reason),
         }
@@ -378,4 +387,8 @@ pub struct ModelUsage {
     pub input: i64,
     pub cached_input: i64,
     pub output: i64,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }

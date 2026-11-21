@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
                 let kind = match failure {
                     ReadFailure::Blocked(_) => "blocked",
                     ReadFailure::Incomplete(_) => "incomplete",
+                    ReadFailure::Unsupported(_) => "unsupported",
                     ReadFailure::Temporary(_) => "temporary",
                     ReadFailure::Throttled { .. } => "throttled",
                 };

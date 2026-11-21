@@ -448,6 +448,9 @@ struct ListingPage {
     links: ListingLinks,
     /// Further listing pages to read, such as the child sitemaps of a sitemap index.
     more: Vec<Url>,
+    /// HTML rows the items selector matched that carry neither a detail link nor any list
+    /// field, such as a header or pagination row inside the listing table.
+    skipped_rows: usize,
 }
 
 #[derive(Default)]
@@ -484,6 +487,7 @@ pub async fn read(
     let mut listing_rows = Vec::new();
     let mut samples = Vec::new();
     let mut skipped_documents = Vec::new();
+    let mut skipped_rows = 0;
     let mut total = None;
     let mut empty_state = false;
     while let Some(mut url) = queue.pop_front() {
@@ -531,6 +535,7 @@ pub async fn read(
             too_many_pages(&listing, recipe)?;
         }
         empty_state |= listing.empty_state;
+        skipped_rows += listing.skipped_rows;
         listing_links.extend(listing.links.all);
         pagination_links.extend(listing.links.pagination);
         let page_rows = listing.rows.len();
@@ -658,6 +663,7 @@ pub async fn read(
             empty_state,
             document_count,
             skipped_documents,
+            skipped_rows,
             listing_pages,
             unfollowed_links,
             samples,
@@ -752,6 +758,7 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         .as_ref()
         .is_some_and(|rule| root.first(rule).is_some());
     let items = source.items(&recipe.items)?;
+    let matched = items.len();
     if items.is_empty() {
         let json_empty = matches!(recipe.listing, Format::Json) && next.is_empty();
         // A numbered page past the end is often just empty.
@@ -762,13 +769,20 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         );
     }
     let mut rows = Vec::with_capacity(items.len());
+    let mut skipped_rows = 0;
     for item in items {
         let detail = resolve_one(&item, recipe.detail_link.as_ref(), &page.url)?;
-        ensure!(
-            recipe.detail_link.is_none() || detail.is_some(),
-            "Listing item lost its detail link"
-        );
         let mut fields = extract(&item, &recipe.list_fields);
+        if recipe.detail_link.is_some() && detail.is_none() {
+            // A table without <thead> or <tfoot> puts its header and pagination rows next to
+            // the tenders, so a `tr` selector matches them too. They carry nothing to read.
+            ensure!(
+                recipe.listing == Format::Html && fields.is_empty(),
+                "Listing item lost its detail link"
+            );
+            skipped_rows += 1;
+            continue;
+        }
         resolve_field_url(&mut fields, &page.url);
         let attachments = if detail.is_some() {
             Attachments::default()
@@ -781,6 +795,19 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
             attachments,
         });
     }
+    // A header and a footer row are expected; most rows losing their link is a layout change
+    // that repair must see, not rows to skip.
+    if skipped_rows > 0 {
+        let kept = rows.len();
+        ensure!(
+            kept > 0 || empty || total == Some(0),
+            "Listing item lost its detail link (all {matched} rows)"
+        );
+        ensure!(
+            skipped_rows <= 2 || skipped_rows <= kept,
+            "Listing item lost its detail link ({skipped_rows} of {matched} rows)"
+        );
+    }
     Ok(ListingPage {
         rows,
         next,
@@ -788,6 +815,7 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         empty_state: empty || total == Some(0),
         links: listing_links(&source, &page.url),
         more: Vec::new(),
+        skipped_rows,
     })
 }
 
@@ -827,6 +855,7 @@ fn feed_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         empty_state,
         links: ListingLinks::default(),
         more: Vec::new(),
+        skipped_rows: 0,
     })
 }
 
@@ -856,6 +885,7 @@ fn sitemap_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         empty_state: false,
         links: ListingLinks::default(),
         more,
+        skipped_rows: 0,
     })
 }
 
@@ -895,6 +925,7 @@ fn ocds_listing(page: &Page) -> Result<ListingPage> {
         empty_state: false,
         links: ListingLinks::default(),
         more: Vec::new(),
+        skipped_rows: 0,
     })
 }
 
@@ -2754,6 +2785,105 @@ mod reader_fix_tests {
         let listing = parse_listing(&filtered, &recipe).unwrap();
         assert_eq!(listing.rows.len(), 2);
         too_many_pages(&listing, &recipe).unwrap();
+    }
+
+    fn satellite_recipe() -> Recipe {
+        serde_json::from_value(serde_json::json!({
+            "listing": "html", "items": "table.table tr",
+            "detail_link": {"path": "a.project", "attribute": "href"},
+            "list_fields": {
+                "title": {"path": "a.project"},
+                "buyerName": {"path": ".buyer"},
+                "publicationDate": {"path": ".published"}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn header_and_footer_rows_without_links_or_fields_are_skipped_and_counted() {
+        let router = Router::new()
+            .route(
+                "/Satellite/company/welcome.do",
+                get(|| async {
+                    HtmlBody(include_str!("../tests/fixtures/satellite/listing.html"))
+                }),
+            )
+            .route(
+                "/Satellite/public/company/project/{id}/de/overview",
+                get(|| async { HtmlBody("<main><h1>Project</h1></main>") }),
+            );
+        let base = serve(router).await;
+        let portal = Url::parse(&format!("{base}/Satellite/company/welcome.do")).unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let http = Fetcher::new(files.path().into()).unwrap().portal(&portal);
+        let read = read(&http, &portal, &satellite_recipe()).await.unwrap();
+
+        let titles: Vec<_> = read
+            .tenders
+            .iter()
+            .filter_map(|t| t.title.clone())
+            .collect();
+        assert_eq!(titles, ["Road resurfacing", "School cleaning"]);
+        assert_eq!(read.evidence.entries, 2);
+        assert_eq!(read.evidence.skipped_rows, 2);
+        let evidence = serde_json::to_value(&read.evidence).unwrap();
+        assert_eq!(evidence["skippedRows"], 2);
+    }
+
+    #[test]
+    fn rows_that_keep_fields_or_mostly_lose_links_still_fail_the_listing() {
+        let url = Url::parse("https://vergabe.example/Satellite/company/welcome.do").unwrap();
+        // Git may check the fixture out with CRLF line endings on Windows.
+        let fixture =
+            include_str!("../tests/fixtures/satellite/listing.html").replace("\r\n", "\n");
+        let fixture = fixture.as_str();
+        let parse = |body: String| {
+            parse_listing(
+                &Page {
+                    url: url.clone(),
+                    body,
+                },
+                &satellite_recipe(),
+            )
+        };
+
+        // A row with list fields but no link is a broken tender row, not a header.
+        let unlinked = fixture.replace(
+            r#"<a class="project" href="/Satellite/public/company/project/CXP4BBB2/de/overview">School cleaning</a>"#,
+            "School cleaning",
+        );
+        let error = parse(unlinked).err().unwrap().to_string();
+        assert!(error.contains("lost its detail link"), "{error}");
+
+        // The cell classes were renamed, so no row keeps a link or a field: all are skipped, a break.
+        let renamed = ["project", "buyer", "published"]
+            .iter()
+            .fold(fixture.to_owned(), |page, class| {
+                page.replace(&format!(r#"class="{class}""#), r#"class="cell""#)
+            });
+        let error = parse(renamed).err().unwrap().to_string();
+        assert!(
+            error.contains("lost its detail link (all 4 rows)"),
+            "{error}"
+        );
+
+        // A header and a footer next to a single tender are still skipped.
+        let row = fixture
+            .find("  <tr>\n    <td class=\"published\">19.11.2026")
+            .unwrap();
+        let row_end = row + fixture[row..].find("</tr>\n").unwrap() + "</tr>\n".len();
+        let single = format!("{}{}", &fixture[..row], &fixture[row_end..]);
+        let listing = parse(single).unwrap();
+        assert_eq!((listing.rows.len(), listing.skipped_rows), (1, 2));
+
+        // Four empty rows next to two tenders is more than a header and a footer.
+        let extra = fixture.replace(
+            "</table>",
+            "<tr><td>&nbsp;</td></tr><tr><td>&nbsp;</td></tr></table>",
+        );
+        let error = parse(extra).err().unwrap().to_string();
+        assert!(error.contains("(4 of 6 rows)"), "{error}");
     }
 }
 
