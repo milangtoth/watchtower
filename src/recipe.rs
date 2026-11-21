@@ -40,12 +40,9 @@ const LISTING_PAGE_LIMIT: usize = 250;
 /// Seconds to wait after an OCDS API answers a later page with something other than JSON.
 const OCDS_THROTTLE_WAIT: u64 = 300;
 
-/// Days of releases an OCDS preset read asks for. Open tenders are published or updated within
-/// this window, so the read does not page through the publisher's whole history.
+/// Days of releases an OCDS preset read asks for when its entry URL filters by date, so the
+/// read does not page through the publisher's whole history.
 const OCDS_WINDOW_DAYS: i64 = 90;
-
-/// The largest page the Find a Tender and Contracts Finder OCDS APIs return.
-const OCDS_PAGE_SIZE: &str = "100";
 
 /// More URLs than this in a sitemap would take too long to read at one request per second.
 const SITEMAP_PAGE_LIMIT: usize = 500;
@@ -476,8 +473,9 @@ pub async fn read(
         Some(start) => resolve(portal_url, start).map_err(incomplete)?,
         None => portal_url.clone(),
     };
+    let mut windowed = false;
     if recipe.preset == Some(Preset::Ocds) {
-        start = ocds_window(&start, chrono::Utc::now());
+        (start, windowed) = ocds_window(&start, chrono::Utc::now());
     }
     let mut queue = VecDeque::from([start]);
     let mut seen_pages = HashSet::new();
@@ -652,6 +650,7 @@ pub async fn read(
             unfollowed_links,
             samples,
             listing_links,
+            windowed,
         },
     })
 }
@@ -829,50 +828,80 @@ fn ocds_listing(page: &Page) -> Result<ListingPage> {
     })
 }
 
-/// Narrows an OCDS API URL to tender-stage releases published or updated in the last
-/// `OCDS_WINDOW_DAYS`, in the largest pages the API allows, using the query parameters of the
-/// API family it recognizes. The window ends now, so the API's cursor reaches a last page.
+/// Shifts the date filters an OCDS entry URL already carries to the last `OCDS_WINDOW_DAYS`.
 ///
-/// Find a Tender (`ocdsReleasePackages`, `ocdsRecordPackages`) filters with `updatedFrom`,
-/// `updatedTo`, `stages` and `limit` and pages with `cursor`. Contracts Finder (`OCDS/Search`)
-/// uses `publishedFrom` and `publishedTo`. Other URLs are read as given. A cursor in the entry
-/// URL is dropped so that every read starts at the window's first page.
-fn ocds_window(url: &Url, now: chrono::DateTime<chrono::Utc>) -> Url {
-    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
-    let has = |name: &str| {
-        url.query_pairs()
-            .any(|(key, _)| key.eq_ignore_ascii_case(name))
-    };
-    let (from, to) = if path.ends_with("/ocdsreleasepackages")
-        || path.ends_with("/ocdsrecordpackages")
-        || has("updatedFrom")
-        || has("updatedTo")
-    {
-        ("updatedFrom", "updatedTo")
-    } else if path.ends_with("/ocds/search") || has("publishedFrom") || has("publishedTo") {
-        ("publishedFrom", "publishedTo")
-    } else {
-        return url.clone();
-    };
-    let replaced = [from, to, "stages", "limit", "cursor"];
-    let mut pairs: Vec<(String, String)> = url
+/// A query parameter is a date filter when its value is a date or date-time and its name ends
+/// like a range bound: `from`, `since`, `after` or `start` for the window's start, `to`,
+/// `until`, `before` or `end` for its end. Start bounds move to `now - OCDS_WINDOW_DAYS` and end
+/// bounds to `now`, each in the value's own format, so the API's cursor reaches a last page.
+/// Other parameters, such as `stages` or `limit`, keep the values the entry URL gives them, and
+/// a `cursor` is dropped so that every read starts at the window's first page.
+///
+/// A URL without date filters is read as given: choosing filters is left to the probe or the
+/// model. Also returns whether the read is windowed, that is, limited to releases from a start
+/// date on. A windowed read leaves out older open tenders, so their absence says nothing.
+fn ocds_window(url: &Url, now: chrono::DateTime<chrono::Utc>) -> (Url, bool) {
+    let start = now - chrono::Duration::days(OCDS_WINDOW_DAYS);
+    let mut shifted = false;
+    let mut windowed = false;
+    let pairs: Vec<(String, String)> = url
         .query_pairs()
-        .filter(|(key, _)| !replaced.iter().any(|name| key.eq_ignore_ascii_case(name)))
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("cursor"))
+        .map(|(key, value)| {
+            let value = match date_bound(&key).zip(date_format(&value)) {
+                Some((bound, format)) => {
+                    shifted = true;
+                    windowed |= bound == DateBound::Start;
+                    let time = if bound == DateBound::Start {
+                        start
+                    } else {
+                        now
+                    };
+                    time.format(format).to_string()
+                }
+                None => value.into_owned(),
+            };
+            (key.into_owned(), value)
+        })
         .collect();
-    let stamp = |time: chrono::DateTime<chrono::Utc>| time.format("%Y-%m-%dT%H:%M:%S").to_string();
-    pairs.extend([
-        (
-            from.to_owned(),
-            stamp(now - chrono::Duration::days(OCDS_WINDOW_DAYS)),
-        ),
-        (to.to_owned(), stamp(now)),
-        ("stages".to_owned(), "tender".to_owned()),
-        ("limit".to_owned(), OCDS_PAGE_SIZE.to_owned()),
-    ]);
-    let mut windowed = url.clone();
-    windowed.query_pairs_mut().clear().extend_pairs(pairs);
-    windowed
+    if !shifted {
+        return (url.clone(), false);
+    }
+    let mut moved = url.clone();
+    moved.query_pairs_mut().clear().extend_pairs(pairs);
+    (moved, windowed)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DateBound {
+    Start,
+    End,
+}
+
+/// Which end of a date range a query parameter's name points at.
+fn date_bound(key: &str) -> Option<DateBound> {
+    let key = key.to_ascii_lowercase();
+    let ends = |suffixes: &[&str]| suffixes.iter().any(|suffix| key.ends_with(suffix));
+    if ends(&["from", "since", "after", "start"]) {
+        Some(DateBound::Start)
+    } else if ends(&["to", "until", "before", "end"]) {
+        Some(DateBound::End)
+    } else {
+        None
+    }
+}
+
+/// The `strftime` format of a date or date-time query value, or `None` for any other value.
+fn date_format(value: &str) -> Option<&'static str> {
+    if DateTime::parse_from_rfc3339(value).is_ok() {
+        Some("%Y-%m-%dT%H:%M:%SZ")
+    } else if NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").is_ok() {
+        Some("%Y-%m-%dT%H:%M:%S")
+    } else if NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok() {
+        Some("%Y-%m-%d")
+    } else {
+        None
+    }
 }
 
 /// The same URL with its page-number query parameter increased by one.
@@ -1935,47 +1964,52 @@ mod reader_fix_tests {
     }
 
     #[test]
-    fn ocds_window_asks_find_a_tender_for_recent_tender_stage_releases() {
+    fn ocds_window_shifts_the_date_filters_the_entry_url_carries() {
         let entry = Url::parse(
-            "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=25&cursor=abc",
+            "https://portal.example/api/releases?updatedFrom=2024-01-01T00:00:00&updatedTo=2024-02-01T00:00:00&stages=tender&limit=25&cursor=abc",
         )
         .unwrap();
+        let (windowed, is_windowed) = ocds_window(&entry, at(9));
         assert_eq!(
-            ocds_window(&entry, at(9)).as_str(),
-            "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?\
+            windowed.as_str(),
+            "https://portal.example/api/releases?\
              updatedFrom=2026-08-22T09%3A00%3A00&updatedTo=2026-11-20T09%3A00%3A00\
-             &stages=tender&limit=100"
+             &stages=tender&limit=25"
         );
-        let records = Url::parse("https://fts.example/api/1.0/ocdsRecordPackages?lang=en").unwrap();
-        let windowed = ocds_window(&records, at(9));
-        let query: Vec<_> = windowed
-            .query_pairs()
-            .map(|(key, _)| key.into_owned())
-            .collect();
+        assert!(is_windowed);
+
+        // Other names and formats keep their own shape; only a start bound makes a window.
+        let entry = Url::parse(
+            "https://portal.example/ocds/search?publishedFrom=2025-03-01&lang=en&modifiedSince=2025-03-01T00:00:00Z",
+        )
+        .unwrap();
+        let (windowed, is_windowed) = ocds_window(&entry, at(0));
+        let query: Vec<_> = windowed.query_pairs().into_owned().collect();
         assert_eq!(
             query,
-            ["lang", "updatedFrom", "updatedTo", "stages", "limit"]
+            [
+                ("publishedFrom".into(), "2026-08-22".into()),
+                ("lang".into(), "en".into()),
+                ("modifiedSince".into(), "2026-08-22T00:00:00Z".into()),
+            ] as [(String, String); 3]
         );
+        assert!(is_windowed);
+        let ends = Url::parse("https://portal.example/api/releases?dateTo=2025-01-01").unwrap();
+        let (windowed, is_windowed) = ocds_window(&ends, at(0));
+        assert_eq!(windowed.query(), Some("dateTo=2026-11-20"));
+        assert!(!is_windowed);
     }
 
     #[test]
-    fn ocds_window_uses_published_dates_for_contracts_finder_and_leaves_other_apis_alone() {
-        let entry = Url::parse(
-            "https://www.contractsfinder.service.gov.uk/Published/Notices/OCDS/Search?stages=award",
-        )
-        .unwrap();
-        let windowed = ocds_window(&entry, at(0));
-        let query: BTreeMap<_, _> = windowed.query_pairs().into_owned().collect();
-        assert_eq!(query["publishedFrom"], "2026-08-22T00:00:00");
-        assert_eq!(query["publishedTo"], "2026-11-20T00:00:00");
-        assert_eq!(query["stages"], "tender");
-        assert_eq!(query["limit"], "100");
+    fn ocds_window_leaves_urls_without_date_filters_unchanged() {
         for other in [
+            "https://portal.example/api/releases?stages=tender&limit=25&cursor=abc",
             "https://portal.example/ocds?page=2",
             "https://portal.example/api/releases.json",
+            "https://portal.example/api/releases?from=somewhere&to=elsewhere",
         ] {
             let url = Url::parse(other).unwrap();
-            assert_eq!(ocds_window(&url, at(0)), url);
+            assert_eq!(ocds_window(&url, at(0)), (url, false));
         }
     }
 
@@ -1984,15 +2018,15 @@ mod reader_fix_tests {
         let requests = Requests::default();
         let router = Router::new()
             .route(
-                "/api/1.0/ocdsReleasePackages",
+                "/api/releases",
                 get(
                     |State(requests): State<Requests>, RawQuery(query): RawQuery| async move {
                         let query = query.unwrap_or_default();
                         requests.lock().unwrap().push(query.clone());
                         let body = if query.contains("cursor=") {
-                            include_str!("../tests/fixtures/ocds/fts_window_page2.json")
+                            include_str!("../tests/fixtures/ocds/window_page2.json")
                         } else {
-                            include_str!("../tests/fixtures/ocds/fts_window_page1.json")
+                            include_str!("../tests/fixtures/ocds/window_page1.json")
                         };
                         ([(header::CONTENT_TYPE, "application/json")], body)
                     },
@@ -2002,7 +2036,9 @@ mod reader_fix_tests {
         let base = serve(router).await;
         let candidate = ConnectionCandidate {
             method: ConnectionMethod::Ocds,
-            entry_url: format!("{base}/api/1.0/ocdsReleasePackages?stages=tender&limit=25"),
+            entry_url: format!(
+                "{base}/api/releases?updatedFrom=2024-01-01T00:00:00&updatedTo=2024-02-01T00:00:00&stages=tender"
+            ),
             found_via: "test".into(),
             http_status: 200,
             content_type: Some("application/json".into()),
@@ -2026,7 +2062,8 @@ mod reader_fix_tests {
         assert_eq!(requests.len(), 2);
         let first: BTreeMap<String, String> = url_query(&requests[0]);
         assert_eq!(first["stages"], "tender");
-        assert_eq!(first["limit"], "100");
+        assert!(!first.contains_key("limit"));
+        assert!(read.evidence.windowed);
         let parse = |value: &str| {
             NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
                 .unwrap()

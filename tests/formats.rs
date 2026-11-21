@@ -136,6 +136,59 @@ async fn ocds_preset_maps_fields_follows_next_links_and_needs_no_learning() {
     h.shutdown().await;
 }
 
+fn days_ago(days: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339()
+}
+
+#[tokio::test]
+async fn windowed_ocds_read_keeps_open_tenders_older_than_its_window() {
+    let mut layout = Layout::two_pages();
+    layout.ocds_dates = [("A", days_ago(10)), ("B", days_ago(10))].into();
+    let h = Harness::attach_connected(
+        layout,
+        html_recipe(),
+        vec![(
+            Ocds,
+            "/ocds/since?updatedFrom=2026-01-01T00:00:00&stages=tender",
+        )],
+    )
+    .await;
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!(ids(&h.tenders().await), ["A", "B"]);
+    let beta_before = h.tender("B").await;
+
+    // B was published 120 days ago and not updated since, so the window no longer returns it.
+    // Its deadline is still ahead. A reports a cancellation within the window.
+    h.change(|layout| {
+        layout.ocds_dates.insert("B", days_ago(120));
+        layout.ocds_statuses.insert("A", "cancelled");
+    })
+    .await;
+    h.observe("ocds-window-aged-out").await;
+    assert_eq!(h.portal().await["state"], "serving");
+    let beta = h.tender("B").await;
+    assert_eq!(
+        beta["status"], "open",
+        "absence from a window is no closure"
+    );
+    assert_eq!(beta, beta_before);
+    assert_eq!(h.tender("A").await["status"], "withdrawn");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn ocds_read_without_a_window_closes_tenders_it_no_longer_lists() {
+    let h =
+        Harness::attach_connected(Layout::two_pages(), html_recipe(), vec![(Ocds, "/ocds")]).await;
+    h.change(|layout| layout.pages = vec![vec![alpha()], Vec::new()])
+        .await;
+    h.observe("ocds-removal").await;
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!(h.tender("B").await["status"], "closed");
+    assert_eq!(h.tender("A").await["status"], "open");
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn repair_falls_back_to_the_next_method_after_both_attempts_fail() {
     let h = Harness::attach_connected(
@@ -236,6 +289,77 @@ fn empty_sitemap_recipe() -> Value {
     let mut recipe = sitemap_recipe();
     recipe["url_pattern"] = json!("/no-such-tenders/");
     recipe
+}
+
+#[tokio::test]
+async fn first_attach_verifies_a_listing_with_an_explicit_zero_total() {
+    let layout = Layout {
+        pages: vec![Vec::new()],
+        total: Some("0".into()),
+        ..Layout::one_page()
+    };
+    let h = Harness::attach_connected(layout, html_recipe(), vec![(Html, "/")]).await;
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!(h.tenders().await, json!([]));
+    assert_eq!(h.model.verifies.load(Ordering::SeqCst), 1);
+    assert_eq!(run_history(&h.runs().await), ["read=ok"]);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn first_attach_tries_another_url_for_the_same_method() {
+    let h = Harness::attach_connected(
+        Layout::two_pages(),
+        feed_recipe(),
+        vec![
+            (Feed, "/sitemap.xml"),
+            (Feed, "/sitemap.xml"),
+            (Feed, "/feed.xml"),
+        ],
+    )
+    .await;
+    assert_eq!(h.portal().await["state"], "serving");
+    let decision = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    assert_eq!((decision.chosen.method, decision.attempt), (Feed, 2));
+    assert!(decision.chosen.entry_url.ends_with("/feed.xml"));
+    assert_eq!(run_history(&h.runs().await), ["read=failed", "read=ok"]);
+    assert_fixture_tenders(&h).await;
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn repair_replaces_a_saved_ted_choice_before_learning() {
+    let h = Harness::attach_connected(
+        Layout::two_pages(),
+        html_recipe(),
+        vec![(Html, "/"), (Ocds, "/ocds")],
+    )
+    .await;
+    let mut saved = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    let job = watchtower::db::Job {
+        id: h.runs().await[0]["id"].as_str().unwrap().into(),
+        portal_id: h.portal.clone(),
+        generation: 1,
+        url: saved.chosen.entry_url.clone(),
+        recipe: None,
+        last_success_at: None,
+    };
+    saved.chosen.method = Ted;
+    saved.chosen.http_status = 0;
+    h.store.record_decision(&job, &saved).await.unwrap();
+    let learns = h.model.learns.load(Ordering::SeqCst);
+    h.change(|layout| layout.total = Some("5".into())).await;
+    let decision = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!((decision.chosen.method, decision.attempt), (Ocds, 2));
+    assert_eq!(h.model.learns.load(Ordering::SeqCst), learns);
+    assert!(
+        decision
+            .alternatives
+            .iter()
+            .any(|c| c.method == Ted && c.score == 0.0)
+    );
+    h.shutdown().await;
 }
 
 #[tokio::test]

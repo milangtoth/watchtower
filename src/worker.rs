@@ -238,8 +238,8 @@ impl Worker {
     }
 
     /// The first attach of a portal without a recipe: choose a connection method, then learn,
-    /// read and check it. When the method fails or reads no tenders, the next usable stored
-    /// alternatives are tried the way repair tries them, each in a read run of its own, up to
+    /// read and check it. If the route fails verification or yields an unexplained empty
+    /// listing, try the remaining usable routes, each in a read run of its own, up to
     /// `MAX_ATTACH_METHODS`. Learning again costs model calls, so a failed attach waits for
     /// the recheck. A login or CAPTCHA fails the attach at once.
     async fn attach(&self, ctx: &ReasoningContext<'_>, snapshot: &Snapshot<'_>) -> Result<()> {
@@ -422,28 +422,27 @@ impl Worker {
         else {
             return Ok(());
         };
-        // Portals attached before connection decisions existed get one now.
-        let decision = match self.store.latest_decision(&job.portal_id).await? {
-            Some(decision) => decision,
-            None => match self.connect(ctx).await? {
-                Ok(decision) => decision,
-                Err(error) if error.is_temporary() => {
-                    return self.defer(job, &run_id, &error).await;
-                }
-                Err(error) => {
-                    return self
-                        .store
-                        .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
-                        .await;
-                }
-            },
+        let (selection, previous) = match self.store.latest_decision(&job.portal_id).await? {
+            Some(saved) if saved.chosen.is_usable() => (Ok(saved), Some(recipe)),
+            Some(saved) => (self.replace_unusable_choice(ctx, saved).await?, None),
+            None => (self.connect(ctx).await?, Some(recipe)),
+        };
+        let decision = match selection {
+            Ok(decision) => decision,
+            Err(error) if error.is_temporary() => return self.defer(job, &run_id, &error).await,
+            Err(error) => {
+                return self
+                    .store
+                    .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
+                    .await;
+            }
         };
         let outcome = self
             .through_methods(
                 ctx,
                 &mut run_id,
                 decision,
-                Some(recipe),
+                previous,
                 Some(failure),
                 snapshot,
                 Mode::Repair(&broke),
@@ -479,6 +478,30 @@ impl Worker {
         self.store.fail(job, &run_id, &reason, retry_in).await
     }
 
+    /// Older decisions can name a method whose reader is no longer available.
+    async fn replace_unusable_choice(
+        &self,
+        ctx: &ReasoningContext<'_>,
+        saved: ConnectionDecision,
+    ) -> Result<Result<ConnectionDecision, ReadFailure>> {
+        let mut candidates = saved.alternatives;
+        candidates.push(saved.chosen);
+        let (remaining, evidence): (Vec<_>, Vec<_>) = discovery::rank_for(ctx.url, candidates)
+            .into_iter()
+            .partition(|candidate| candidate.is_usable());
+        if remaining.is_empty() {
+            return self.connect(ctx).await;
+        }
+        let mut next = match self.model.redecide(ctx, remaining).await {
+            Ok(next) => next,
+            Err(error) => return Ok(Err(error)),
+        };
+        next.alternatives.extend(evidence);
+        next.attempt = saved.attempt + 1;
+        self.store.record_decision(ctx.job, &next).await?;
+        Ok(Ok(next))
+    }
+
     /// Tries the decided connection method, then the next usable stored alternatives in ranked
     /// order, until one publishes, a login or CAPTCHA blocks delivery, a temporary failure
     /// interrupts, or `mode` allows no further method. Each new method is a recorded decision;
@@ -512,6 +535,7 @@ impl Worker {
             };
             tried.push(TriedMethod {
                 method: decision.chosen.method,
+                entry_url: decision.chosen.entry_url.clone(),
                 failure: last.to_string(),
             });
             if last.is_temporary() || tried.len() >= mode.max_methods() {
@@ -524,7 +548,10 @@ impl Worker {
                 .alternatives
                 .iter()
                 .filter(|candidate| {
-                    candidate.is_usable() && !tried.iter().any(|t| t.method == candidate.method)
+                    candidate.is_usable()
+                        && !tried.iter().any(|t| {
+                            t.method == candidate.method && t.entry_url == candidate.entry_url
+                        })
                 })
                 .cloned()
                 .collect();
@@ -590,7 +617,7 @@ impl Worker {
 
     /// Learns and checks recipes for one connection method: twice, or once for a preset that
     /// would produce the same recipe again. Publishes on success. Learning starts from
-    /// `recipe` and `failure` when both are known. On attach a read without tenders fails.
+    /// `recipe` and `failure` when both are known. Empty first reads require source evidence.
     async fn try_method(
         &self,
         ctx: &ReasoningContext<'_>,
@@ -620,13 +647,19 @@ impl Worker {
                 }
             };
             let attempt = match self.read(ctx, run_id, learned).await {
-                Ok(candidate) if run.mode.is_attach() && candidate.tenders.is_empty() => Err((
-                    Stage::Read,
-                    ReadFailure::Incomplete(format!(
-                        "{} read found no tenders",
-                        decision.chosen.method.label()
-                    )),
-                )),
+                Ok(candidate)
+                    if run.mode.is_attach()
+                        && candidate.tenders.is_empty()
+                        && !candidate.evidence.empty_state =>
+                {
+                    Err((
+                        Stage::Read,
+                        ReadFailure::Incomplete(format!(
+                            "{} read found no tenders",
+                            decision.chosen.method.label()
+                        )),
+                    ))
+                }
                 Ok(candidate) => self.check(ctx, learned, candidate, snapshot, true).await,
                 Err(error) => Err((Stage::Read, error)),
             };
@@ -765,9 +798,9 @@ fn recipe_changes(path: &str, before: &Value, after: &Value, changes: &mut Vec<S
     changes.push(format!("{path} {} → {}", show(before), show(after)));
 }
 
-/// Connection methods a repair tries before the portal is failed.
+/// Distinct connection routes a repair tries before the portal is failed.
 const MAX_METHODS: usize = 2;
-/// Connection methods a first attach tries before the portal is failed.
+/// Distinct connection routes a first attach tries before the portal is failed.
 const MAX_ATTACH_METHODS: usize = 3;
 
 /// Why methods are being tried: a first attach without a recipe, or a repair of one. A
@@ -855,6 +888,7 @@ enum MethodsOutcome {
 /// A connection method that did not deliver, with its last failure.
 struct TriedMethod {
     method: ConnectionMethod,
+    entry_url: String,
     failure: String,
 }
 
@@ -937,7 +971,8 @@ const COMPARED_FIELDS: &[&str] = &[
 ///
 /// Returns an error when the read is incomplete: it has no positive end-of-list evidence,
 /// it skipped a listing page that the last verified read fetched and that is still linked, or
-/// more than half of the open tenders (at least two) vanished while the listing shows no empty
+/// more than half of the open tenders (at least two) vanished from a read that is not windowed
+/// while the listing shows no empty
 /// state. Otherwise returns a review. Its signals are empty only when nothing suggests the read
 /// is wrong, in which case a repeat read publishes without a model call.
 fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, ReadFailure> {
@@ -990,13 +1025,16 @@ fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, 
         .map(|published| &published.tender)
         .filter(|tender| tender.status == TenderStatus::Open)
         .collect();
+    // A windowed read leaves out open tenders not updated within its window, and publication
+    // keeps them, so their absence is no sign that the read is wrong.
     let vanished: Vec<&Tender> = open
         .iter()
         .copied()
         .filter(|tender| {
-            tender
-                .key()
-                .is_none_or(|key| !candidates.contains_key(&key))
+            !evidence.windowed
+                && tender
+                    .key()
+                    .is_none_or(|key| !candidates.contains_key(&key))
         })
         .collect();
     if vanished.len() >= 2 && vanished.len() * 2 > open.len() && !evidence.empty_state {
@@ -1262,6 +1300,7 @@ mod tests {
                 unfollowed_links: Vec::new(),
                 samples: Vec::new(),
                 listing_links: HashSet::new(),
+                windowed: false,
             },
             tenders,
         }
