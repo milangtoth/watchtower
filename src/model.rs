@@ -249,7 +249,8 @@ Allowed recipe fields:
   Detail pages on one portal can use different templates (for example h2 and h3 headings around
   attachments). When rows link to different URL patterns, sample a detail page of each pattern and
   choose document selectors that match all of them, such as a shared class rather than a tag.
-- documents: file links within each attachment page when document_page is set. Otherwise documents
+- documents: file links within each attachment page when document_page is set. Optional: without
+  it, Watchtower finds file and download links on each attachment page itself. Otherwise documents
   is another way to select direct file links from the tender row or detail.
 - nested_document_pages: optional links within attachment pages that lead to another attachment
   page. Use this for an HTML intermediary that points onward to the files. Traversal allows up to
