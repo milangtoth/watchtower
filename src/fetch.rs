@@ -21,6 +21,8 @@ const PAGE_LIMIT: usize = 8 * 1024 * 1024;
 /// The sitemap protocol allows 50 MB per uncompressed file.
 const UNPACKED_PAGE_LIMIT: usize = 64 * 1024 * 1024;
 const FILE_LIMIT: u64 = 250 * 1024 * 1024;
+/// The most bytes one ZIP may expand to, counted as they are decompressed.
+const ARCHIVE_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 
 #[derive(Clone)]
@@ -52,8 +54,22 @@ pub(crate) struct Sample {
 
 #[derive(Debug)]
 pub(crate) enum DocumentResponse {
-    Files(Vec<Document>),
+    /// Staged files, plus notes on files left out because they passed a size limit.
+    Files {
+        documents: Vec<Document>,
+        skipped: Vec<String>,
+    },
     Html(Page),
+}
+
+impl DocumentResponse {
+    fn skipped(note: String) -> Self {
+        tracing::warn!(note, "Document skipped");
+        Self::Files {
+            documents: Vec::new(),
+            skipped: vec![note],
+        }
+    }
 }
 
 impl Fetcher {
@@ -256,13 +272,13 @@ impl PortalHttp {
                 body,
             }));
         }
+        let name = filename(&response);
         if response
             .content_length()
             .is_some_and(|len| len > FILE_LIMIT)
         {
-            return Ok(DocumentResponse::Files(Vec::new()));
+            return Ok(DocumentResponse::skipped(over_file_limit(&name)));
         }
-        let name = filename(&response);
         let temp = NamedTempFile::new_in(&self.fetcher.files).map_err(file_error)?;
         let mut file = tokio::fs::File::create(temp.path())
             .await
@@ -278,7 +294,7 @@ impl PortalHttp {
         {
             size += chunk.len() as u64;
             if size > FILE_LIMIT {
-                return Ok(DocumentResponse::Files(Vec::new()));
+                return Ok(DocumentResponse::skipped(over_file_limit(&name)));
             }
             if magic.len() < 4 {
                 magic.extend_from_slice(&chunk[..chunk.len().min(4 - magic.len())]);
@@ -294,15 +310,26 @@ impl PortalHttp {
             || (!name.contains('.') && magic.starts_with(b"PK\x03\x04"));
         tokio::task::spawn_blocking(move || {
             if archive {
-                unpack(temp.path(), &directory)
+                unpack(temp.path(), &directory, &name, UnpackLimits::default())
             } else {
                 let sha = format!("{:x}", hash.finalize());
-                Ok(vec![persist(temp, &directory, name, size, sha)?])
+                Ok(Unpacked {
+                    documents: vec![persist(temp, &directory, name, size, sha)?],
+                    skipped: Vec::new(),
+                })
             }
         })
         .await
         .map_err(file_error)?
-        .map(DocumentResponse::Files)
+        .map(|unpacked| {
+            for note in &unpacked.skipped {
+                tracing::warn!(note, "Archive member skipped");
+            }
+            DocumentResponse::Files {
+                documents: unpacked.documents,
+                skipped: unpacked.skipped,
+            }
+        })
         .map_err(file_error)
     }
 }
@@ -469,18 +496,75 @@ fn persist(
     })
 }
 
-fn unpack(path: &Path, directory: &Path) -> Result<Vec<Document>> {
+fn over_file_limit(name: &str) -> String {
+    format!(
+        "{name}: skipped, larger than the {} file limit",
+        size_label(FILE_LIMIT)
+    )
+}
+
+fn size_label(bytes: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    if bytes >= MB && bytes.is_multiple_of(MB) {
+        format!("{} MB", bytes / MB)
+    } else {
+        format!("{bytes}-byte")
+    }
+}
+
+/// Size limits for unpacking one ZIP. Tests use small limits.
+#[derive(Clone, Copy)]
+struct UnpackLimits {
+    /// The most bytes one member may expand to.
+    file: u64,
+    /// The most bytes the whole archive may expand to, including members that were discarded.
+    total: u64,
+}
+
+impl Default for UnpackLimits {
+    fn default() -> Self {
+        Self {
+            file: FILE_LIMIT,
+            total: ARCHIVE_LIMIT,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Unpacked {
+    documents: Vec<Document>,
+    /// One note per member left out over the file limit, and one for the members left out
+    /// once the archive reached its expanded-size limit.
+    skipped: Vec<String>,
+}
+
+/// Unpacks the files in a ZIP. Directory structure is dropped and nested archives stay files.
+///
+/// Sizes are measured from the bytes actually decompressed, never from the headers. A member
+/// that expands past `limits.file` is discarded. Once the archive would expand past
+/// `limits.total`, the member in progress is discarded and no further members are read. Every
+/// decompressed byte counts toward the total, including bytes of discarded members, so the
+/// work and disk use stay bounded whatever the headers claim. A member is staged and listed
+/// only after it was read completely.
+fn unpack(
+    path: &Path,
+    directory: &Path,
+    archive_name: &str,
+    limits: UnpackLimits,
+) -> Result<Unpacked> {
     let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
     anyhow::ensure!(
         archive.len() <= MAX_ARCHIVE_ENTRIES,
         "ZIP contains too many entries"
     );
     let mut expanded = 0_u64;
-    let mut docs = Vec::new();
+    let mut documents = Vec::new();
+    let mut skipped = Vec::new();
     let mut buffer = [0; 64 * 1024];
-    for index in 0..archive.len() {
+    let entries = archive.len();
+    for index in 0..entries {
         let mut entry = archive.by_index(index)?;
-        if entry.is_dir() || entry.size() > FILE_LIMIT {
+        if entry.is_dir() {
             continue;
         }
         let name = entry
@@ -490,38 +574,66 @@ fn unpack(path: &Path, directory: &Path) -> Result<Vec<Document>> {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .context("ZIP contains an invalid entry path")?;
+        if entry.size() > limits.file {
+            skipped.push(format!(
+                "{archive_name}/{name}: skipped, declared larger than the {} file limit",
+                size_label(limits.file)
+            ));
+            continue;
+        }
         let mut temp = NamedTempFile::new_in(directory)?;
         let mut hash = Sha256::new();
         let mut size = 0_u64;
+        let mut over_file = false;
+        let mut over_total = false;
         loop {
             let length = entry.read(&mut buffer)?;
             if length == 0 {
                 break;
             }
-            size += length as u64;
+            if expanded + length as u64 > limits.total {
+                over_total = true;
+                break;
+            }
             expanded += length as u64;
-            anyhow::ensure!(
-                expanded <= 1024 * 1024 * 1024,
-                "ZIP exceeds the total decompression limit"
-            );
-            if size > FILE_LIMIT {
+            size += length as u64;
+            if size > limits.file {
+                over_file = true;
                 break;
             }
             hash.update(&buffer[..length]);
             temp.write_all(&buffer[..length])?;
         }
-        if size <= FILE_LIMIT {
-            temp.flush()?;
-            docs.push(persist(
-                temp,
-                directory,
-                name,
-                size,
-                format!("{:x}", hash.finalize()),
-            )?);
+        if over_total {
+            drop(temp);
+            let remaining = entries - index;
+            skipped.push(format!(
+                "{archive_name}: stopped at the {} expanded-size limit; skipped {name} and \
+                 {} later entr{}",
+                size_label(limits.total),
+                remaining - 1,
+                if remaining == 2 { "y" } else { "ies" }
+            ));
+            break;
         }
+        if over_file {
+            drop(temp);
+            skipped.push(format!(
+                "{archive_name}/{name}: skipped, expands past the {} file limit",
+                size_label(limits.file)
+            ));
+            continue;
+        }
+        temp.flush()?;
+        documents.push(persist(
+            temp,
+            directory,
+            name,
+            size,
+            format!("{:x}", hash.finalize()),
+        )?);
     }
-    Ok(docs)
+    Ok(Unpacked { documents, skipped })
 }
 
 #[cfg(test)]
@@ -561,5 +673,188 @@ mod transport_tests {
         let wait = retry_after(&later).unwrap().as_secs();
         assert!((85..=90).contains(&wait), "{wait}");
         assert_eq!(retry_after("soon"), None);
+    }
+}
+
+#[cfg(test)]
+mod unpack_tests {
+    use super::*;
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    fn zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, data) in members {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// Rewrites the uncompressed size of `member` in its local and central headers.
+    fn declare_size(archive: &mut [u8], member: &str, size: u32) {
+        let mut patched = 0;
+        for offset in 0..archive.len().saturating_sub(46) {
+            let (size_at, length_at, name_at) = match &archive[offset..offset + 4] {
+                b"PK\x03\x04" => (offset + 22, offset + 26, offset + 30),
+                b"PK\x01\x02" => (offset + 24, offset + 28, offset + 46),
+                _ => continue,
+            };
+            let length = u16::from_le_bytes([archive[length_at], archive[length_at + 1]]) as usize;
+            if archive.get(name_at..name_at + length) == Some(member.as_bytes()) {
+                archive[size_at..size_at + 4].copy_from_slice(&size.to_le_bytes());
+                patched += 1;
+            }
+        }
+        assert_eq!(patched, 2, "expected a local and a central header");
+    }
+
+    struct Staged {
+        result: Result<Unpacked>,
+        /// Names of the files left in the staging directory.
+        files: Vec<String>,
+        _directory: tempfile::TempDir,
+    }
+
+    fn unpack_bytes(archive: &[u8], file: u64, total: u64) -> Staged {
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("bundle.zip");
+        std::fs::write(&path, archive).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let result = unpack(
+            &path,
+            directory.path(),
+            "bundle.zip",
+            UnpackLimits { file, total },
+        );
+        let mut files: Vec<String> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        if let Ok(unpacked) = &result {
+            for document in &unpacked.documents {
+                let bytes = std::fs::read(directory.path().join(&document.sha256)).unwrap();
+                assert_eq!(bytes.len() as u64, document.size_bytes);
+                assert_eq!(format!("{:x}", Sha256::digest(&bytes)), document.sha256);
+                assert_eq!(document.path, format!("/files/{}", document.sha256));
+            }
+        }
+        Staged {
+            result,
+            files,
+            _directory: directory,
+        }
+    }
+
+    fn names(unpacked: &Unpacked) -> Vec<&str> {
+        unpacked
+            .documents
+            .iter()
+            .map(|document| document.file_name.as_str())
+            .collect()
+    }
+
+    /// The staging directory holds exactly the listed documents: nothing half-written.
+    fn assert_only_documents(staged: &Staged) {
+        let unpacked = staged.result.as_ref().unwrap();
+        let mut expected: Vec<String> = unpacked
+            .documents
+            .iter()
+            .map(|document| document.sha256.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(staged.files, expected);
+    }
+
+    #[test]
+    fn total_over_the_limit_keeps_earlier_members_and_skips_the_rest() {
+        let archive = zip(&[
+            ("a.txt", &[b'a'; 100]),
+            ("docs/b.txt", &[b'b'; 100]),
+            ("c.txt", &[b'c'; 100]),
+            ("d.txt", &[b'd'; 100]),
+        ]);
+        let staged = unpack_bytes(&archive, 1_000, 250);
+        let unpacked = staged.result.as_ref().unwrap();
+        assert_eq!(names(unpacked), ["a.txt", "b.txt"]);
+        assert_eq!(
+            unpacked.skipped,
+            [
+                "bundle.zip: stopped at the 250-byte expanded-size limit; skipped c.txt and 1 later entry"
+            ]
+        );
+        assert_only_documents(&staged);
+    }
+
+    #[test]
+    fn member_over_the_file_limit_is_skipped_and_later_members_kept() {
+        let archive = zip(&[
+            ("first.txt", &[b'1'; 50]),
+            ("big.bin", &[b'x'; 200]),
+            ("last.txt", &[b'2'; 50]),
+        ]);
+        let staged = unpack_bytes(&archive, 150, 10_000);
+        let unpacked = staged.result.as_ref().unwrap();
+        assert_eq!(names(unpacked), ["first.txt", "last.txt"]);
+        assert_eq!(
+            unpacked.skipped,
+            ["bundle.zip/big.bin: skipped, declared larger than the 150-byte file limit"]
+        );
+        assert_only_documents(&staged);
+    }
+
+    #[test]
+    fn understated_member_size_is_measured_while_streaming() {
+        let mut archive = zip(&[("bomb.bin", &[0; 10_000]), ("ok.txt", b"fine")]);
+        declare_size(&mut archive, "bomb.bin", 10);
+        let staged = unpack_bytes(&archive, 150, 1_000_000);
+        let unpacked = staged.result.as_ref().unwrap();
+        assert_eq!(names(unpacked), ["ok.txt"]);
+        assert_eq!(
+            unpacked.skipped,
+            ["bundle.zip/bomb.bin: skipped, expands past the 150-byte file limit"]
+        );
+        assert_only_documents(&staged);
+    }
+
+    #[test]
+    fn understated_member_bytes_count_toward_the_archive_limit() {
+        let mut archive = zip(&[
+            ("small.txt", &[b's'; 100]),
+            ("bomb.bin", &[0; 10_000]),
+            ("ok.txt", b"fine"),
+        ]);
+        declare_size(&mut archive, "bomb.bin", 10);
+        let staged = unpack_bytes(&archive, 1_000_000, 500);
+        let unpacked = staged.result.as_ref().unwrap();
+        assert_eq!(names(unpacked), ["small.txt"]);
+        assert_eq!(
+            unpacked.skipped,
+            [
+                "bundle.zip: stopped at the 500-byte expanded-size limit; skipped bomb.bin and 1 later entry"
+            ]
+        );
+        assert_only_documents(&staged);
+    }
+
+    #[test]
+    fn nested_archives_stay_files_and_traversal_paths_are_refused() {
+        let inner = zip(&[("inner.txt", b"inner")]);
+        let staged = unpack_bytes(&zip(&[("nested.zip", &inner)]), 1_000, 10_000);
+        assert_eq!(names(staged.result.as_ref().unwrap()), ["nested.zip"]);
+        assert_only_documents(&staged);
+
+        let staged = unpack_bytes(&zip(&[("../evil.txt", b"evil")]), 1_000, 10_000);
+        let error = staged.result.unwrap_err().to_string();
+        assert!(error.contains("invalid entry path"), "{error}");
+        assert!(staged.files.is_empty());
+    }
+
+    #[test]
+    fn size_labels_name_megabytes_or_bytes() {
+        assert_eq!(size_label(FILE_LIMIT), "250 MB");
+        assert_eq!(size_label(ARCHIVE_LIMIT), "1024 MB");
+        assert_eq!(size_label(150), "150-byte");
     }
 }
