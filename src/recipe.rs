@@ -774,13 +774,29 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         let detail = resolve_one(&item, recipe.detail_link.as_ref(), &page.url)?;
         let mut fields = extract(&item, &recipe.list_fields);
         if recipe.detail_link.is_some() && detail.is_none() {
-            // A table without <thead> or <tfoot> puts its header and pagination rows next to
-            // the tenders, so a `tr` selector matches them too. They carry nothing to read.
             ensure!(
-                recipe.listing == Format::Html && fields.is_empty(),
+                recipe.listing == Format::Html,
                 "Listing item lost its detail link"
             );
-            skipped_rows += 1;
+            if fields.is_empty() {
+                // A table without <thead> or <tfoot> puts its header and pagination rows next
+                // to the tenders, so a `tr` selector matches them too. They carry nothing to read.
+                skipped_rows += 1;
+                continue;
+            }
+            // Some tables spread one tender over several rows: a linked title row, then rows
+            // with its buyer or dates. Such a row adds fields the tender above does not have
+            // yet. A row repeating fields the tender above already has is a tender that lost
+            // its link.
+            let previous = rows
+                .last_mut()
+                .filter(|row: &&mut ListingRow| row.detail.is_some())
+                .filter(|row| fields.keys().all(|key| !row.fields.contains_key(key)));
+            let Some(previous) = previous else {
+                anyhow::bail!("Listing item lost its detail link");
+            };
+            resolve_field_url(&mut fields, &page.url);
+            previous.fields.extend(fields);
             continue;
         }
         resolve_field_url(&mut fields, &page.url);
@@ -3143,5 +3159,71 @@ mod listing_route_tests {
             .into_iter()
             .collect();
         assert_eq!(last_linked_page(&offset, &links), None);
+    }
+}
+
+#[cfg(test)]
+mod continuation_row_tests {
+    use super::*;
+    use serde_json::json;
+
+    const TABLE: &str = r#"<table class="row-tbody"><tbody>
+<tr><th colspan="4">Name</th></tr>
+<tr><td colspan="4" class="row-separator-top"><a href="contract_display_1.html">Hospital beds</a></td></tr>
+<tr><td colspan="4" class="sub-name"><i><a href="profile_display_5.html">Regional hospital</a></i></td></tr>
+<tr><td>Small</td><td>Open</td><td>04.11.2026</td><td>23.11.2026 10:00</td></tr>
+<tr><td colspan="4" class="row-separator-top"><a href="contract_display_2.html">Laser cutter</a></td></tr>
+<tr><td colspan="4" class="sub-name"><i><a href="profile_display_6.html">Technical school</a></i></td></tr>
+<tr><td>Small</td><td>Open</td><td>07.10.2026</td><td>25.11.2026 10:00</td></tr>
+</tbody></table>"#;
+
+    fn recipe() -> Recipe {
+        serde_json::from_value(json!({
+            "listing": "html", "items": "table.row-tbody tbody tr",
+            "detail_link": {"path": "a[href^='contract_display_']", "attribute": "href"},
+            "list_fields": {
+                "title": {"path": "a[href^='contract_display_']"},
+                "buyerName": {"path": "td.sub-name a"},
+                "submissionDeadline": {"path": "td:nth-child(4)"}
+            }
+        }))
+        .unwrap()
+    }
+
+    fn parse(body: &str) -> Result<ListingPage> {
+        parse_listing(
+            &Page {
+                url: Url::parse("https://ezak.example/contract_index.html").unwrap(),
+                body: body.into(),
+            },
+            &recipe(),
+        )
+    }
+
+    #[test]
+    fn rows_after_a_linked_row_add_their_fields_to_that_tender() {
+        let listing = parse(TABLE).unwrap();
+        assert_eq!((listing.rows.len(), listing.skipped_rows), (2, 1));
+        let first = &listing.rows[0].fields;
+        assert_eq!(first["title"], vec!["Hospital beds".to_string()]);
+        assert_eq!(first["buyerName"], vec!["Regional hospital".to_string()]);
+        assert_eq!(
+            first["submissionDeadline"],
+            vec!["23.11.2026 10:00".to_string()]
+        );
+        assert_eq!(
+            listing.rows[1].fields["buyerName"],
+            vec!["Technical school".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_row_repeating_the_fields_above_is_a_tender_that_lost_its_link() {
+        let broken = TABLE.replace(
+            r#"<a href="contract_display_2.html">Laser cutter</a>"#,
+            r#"<a href="other.html">Laser cutter</a></td></tr><tr><td colspan="4" class="sub-name"><i><a href="p.html">Twice</a></i>"#,
+        );
+        let error = parse(&broken).err().unwrap().to_string();
+        assert!(error.contains("lost its detail link"), "{error}");
     }
 }
