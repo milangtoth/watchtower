@@ -61,15 +61,20 @@ pub trait PortalModel: Send + Sync {
     }
 }
 
-/// A decision for the first of `ranked`, with the rest as alternatives and no model involved.
+/// A decision for the first usable candidate of `ranked`, with the rest, in order, as
+/// alternatives and no model involved. Unusable candidates, such as TED, are kept as evidence
+/// but never chosen.
 pub fn top_ranked(
-    ranked: Vec<ConnectionCandidate>,
+    mut ranked: Vec<ConnectionCandidate>,
     attempt: u32,
 ) -> Result<ConnectionDecision, ReadFailure> {
-    let mut candidates = ranked.into_iter();
-    let chosen = candidates.next().ok_or_else(|| {
-        ReadFailure::Incomplete("Probing found no usable way to read this portal".into())
-    })?;
+    let index = ranked
+        .iter()
+        .position(ConnectionCandidate::is_usable)
+        .ok_or_else(|| {
+            ReadFailure::Incomplete("Probing found no usable way to read this portal".into())
+        })?;
+    let chosen = ranked.remove(index);
     Ok(ConnectionDecision {
         rationale: format!(
             "Highest-ranked candidate: {} at {}",
@@ -77,7 +82,7 @@ pub fn top_ranked(
             chosen.entry_url
         ),
         chosen,
-        alternatives: candidates.collect(),
+        alternatives: ranked,
         model: "none (top-ranked)".into(),
         decided_at: chrono::Utc::now().to_rfc3339(),
         attempt,

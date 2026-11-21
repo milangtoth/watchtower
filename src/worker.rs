@@ -2,8 +2,8 @@ use crate::{
     db::{Job, OutageLimit, Store},
     discovery,
     domain::{
-        CandidateRead, ConnectionDecision, FieldChange, MovedFile, PublishedTender, ReadFailure,
-        Review, StoredEvidence, Tender, TenderStatus, TenderSummary,
+        CandidateRead, ConnectionDecision, ConnectionMethod, FieldChange, MovedFile,
+        PublishedTender, ReadFailure, Review, StoredEvidence, Tender, TenderStatus, TenderSummary,
     },
     fetch::Fetcher,
     model::{PortalModel, ReasoningContext},
@@ -171,37 +171,11 @@ impl Worker {
             evidence: prior.as_ref(),
         };
 
-        let recipe = match previous.as_ref() {
-            Some(recipe) => Ok(recipe.clone()),
-            None => match self.connect(&ctx).await? {
-                Ok(decision) => self.learn(&ctx, None, &decision).await,
-                Err(failure) => Err(failure),
-            },
+        let Some(recipe) = previous else {
+            return self.attach(&ctx, &snapshot).await;
         };
-        let recipe = match recipe {
-            Ok(recipe) => recipe,
-            Err(failure) if failure.is_temporary() => {
-                return self.defer(job, &job.id, &failure).await;
-            }
-            // Learning again costs model calls, so a failed attach waits for the recheck.
-            Err(failure) => {
-                return self
-                    .store
-                    .fail(job, &job.id, &failure.to_string(), self.recovery.recheck)
-                    .await;
-            }
-        };
-        let mut read = recipe::read(&http, &url, &recipe).await;
-        if let Err(failure @ ReadFailure::Temporary(_)) = &read {
-            tracing::warn!(portal_id = %job.portal_id, run_id = %job.id, %failure, "Retrying portal read");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            read = recipe::read(&http, &url, &recipe).await;
-        }
-        let result = match read {
-            Ok(candidate) => {
-                self.check(&ctx, &recipe, candidate, &snapshot, previous.is_none())
-                    .await
-            }
+        let result = match self.read(&ctx, &job.id, &recipe).await {
+            Ok(candidate) => self.check(&ctx, &recipe, candidate, &snapshot, false).await,
             Err(failure) => Err((Stage::Read, failure)),
         };
         let result = result.map_err(|(stage, failure)| {
@@ -210,12 +184,8 @@ impl Worker {
         });
         match result {
             Ok(candidate) => {
-                let note = if previous.is_none() {
-                    "Attached and verified"
-                } else {
-                    "Read verified"
-                };
-                self.publish(job, &job.id, &recipe, candidate, note).await
+                self.publish(job, &job.id, &recipe, candidate, "Read verified")
+                    .await
             }
             Err(failure) if failure.is_temporary() => self.defer(job, &job.id, &failure).await,
             Err(failure @ ReadFailure::Blocked(_)) => {
@@ -241,6 +211,71 @@ impl Worker {
                         .await;
                 }
                 self.repair(&ctx, recipe, failure, &snapshot).await
+            }
+        }
+    }
+
+    /// Reads the portal with `recipe`, retrying once after a short wait on a temporary failure.
+    async fn read(
+        &self,
+        ctx: &ReasoningContext<'_>,
+        run_id: &str,
+        recipe: &Recipe,
+    ) -> Result<CandidateRead, ReadFailure> {
+        let read = recipe::read(ctx.http, ctx.url, recipe).await;
+        if let Err(failure @ ReadFailure::Temporary(_)) = &read {
+            tracing::warn!(portal_id = %ctx.job.portal_id, run_id, %failure, "Retrying portal read");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            return recipe::read(ctx.http, ctx.url, recipe).await;
+        }
+        read
+    }
+
+    /// The first attach of a portal without a recipe: choose a connection method, then learn,
+    /// read and check it. When the method fails or reads no tenders, the next usable stored
+    /// alternatives are tried the way repair tries them, each in a read run of its own, up to
+    /// `MAX_ATTACH_METHODS`. Learning again costs model calls, so a failed attach waits for
+    /// the recheck. A login or CAPTCHA fails the attach at once.
+    async fn attach(&self, ctx: &ReasoningContext<'_>, snapshot: &Snapshot<'_>) -> Result<()> {
+        let job = ctx.job;
+        let decision = match self.connect(ctx).await? {
+            Ok(decision) => decision,
+            Err(failure) if failure.is_temporary() => {
+                return self.defer(job, &job.id, &failure).await;
+            }
+            Err(failure) => {
+                return self
+                    .store
+                    .fail(job, &job.id, &failure.to_string(), self.recovery.recheck)
+                    .await;
+            }
+        };
+        let mut run_id = job.id.clone();
+        let outcome = self
+            .through_methods(
+                ctx,
+                &mut run_id,
+                decision,
+                None,
+                None,
+                snapshot,
+                Mode::Attach,
+            )
+            .await?;
+        match outcome {
+            MethodsOutcome::Published | MethodsOutcome::Removed => Ok(()),
+            MethodsOutcome::Blocked(failure) => {
+                self.store
+                    .fail(job, &run_id, &failure.to_string(), self.recovery.recheck)
+                    .await
+            }
+            MethodsOutcome::Failed { failure, .. } if failure.is_temporary() => {
+                self.defer(job, &run_id, &failure).await
+            }
+            MethodsOutcome::Failed { tried, .. } => {
+                self.store
+                    .fail(job, &run_id, &attach_reason(&tried), self.recovery.recheck)
+                    .await
             }
         }
     }
@@ -368,13 +403,13 @@ impl Worker {
     async fn repair(
         &self,
         ctx: &ReasoningContext<'_>,
-        mut recipe: Recipe,
-        mut failure: ReadFailure,
+        recipe: Recipe,
+        failure: ReadFailure,
         snapshot: &Snapshot<'_>,
     ) -> Result<()> {
         let job = ctx.job;
         let broke = describe_break(&failure, snapshot);
-        let Some(run_id) = self
+        let Some(mut run_id) = self
             .store
             .begin_repair(job, &failure.to_string(), &broke)
             .await?
@@ -382,7 +417,7 @@ impl Worker {
             return Ok(());
         };
         // Portals attached before connection decisions existed get one now.
-        let mut decision = match self.store.latest_decision(&job.portal_id).await? {
+        let decision = match self.store.latest_decision(&job.portal_id).await? {
             Some(decision) => decision,
             None => match self.connect(ctx).await? {
                 Ok(decision) => decision,
@@ -397,67 +432,27 @@ impl Worker {
                 }
             },
         };
-        let mut tried = vec![decision.chosen.method];
-        loop {
-            let error = self
-                .repair_method(
-                    ctx,
-                    &RepairRun {
-                        id: &run_id,
-                        broke: &broke,
-                    },
-                    &mut recipe,
-                    &mut failure,
-                    snapshot,
-                    &decision,
-                )
-                .await?;
-            match error {
-                RepairOutcome::Published => return Ok(()),
-                RepairOutcome::Blocked(error) => {
-                    return self
-                        .store
-                        .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
-                        .await;
-                }
-                RepairOutcome::Exhausted => {}
+        let outcome = self
+            .through_methods(
+                ctx,
+                &mut run_id,
+                decision,
+                Some(recipe),
+                Some(failure),
+                snapshot,
+                Mode::Repair(&broke),
+            )
+            .await?;
+        let (tried, failure) = match outcome {
+            MethodsOutcome::Published | MethodsOutcome::Removed => return Ok(()),
+            MethodsOutcome::Blocked(error) => {
+                return self
+                    .store
+                    .fail(job, &run_id, &error.to_string(), self.recovery.recheck)
+                    .await;
             }
-            if failure.is_temporary() || tried.len() >= MAX_METHODS {
-                break;
-            }
-            let remaining: Vec<_> = decision
-                .alternatives
-                .iter()
-                .filter(|candidate| candidate.is_usable() && !tried.contains(&candidate.method))
-                .cloned()
-                .collect();
-            if remaining.is_empty() {
-                break;
-            }
-            let mut next = match self.model.redecide(ctx, remaining).await {
-                Ok(next) => next,
-                Err(error) => {
-                    failure = error;
-                    break;
-                }
-            };
-            next.attempt = decision.attempt + 1;
-            next.rationale = format!(
-                "{} failed during repair ({}). {}",
-                decision.chosen.method.label(),
-                recipe::sample(&failure.to_string(), 300),
-                next.rationale
-            );
-            decision = next;
-            self.store.record_decision(job, &decision).await?;
-            tracing::warn!(
-                portal_id = %job.portal_id,
-                method = decision.chosen.method.label(),
-                attempt = decision.attempt,
-                "Repair falls back to the next connection method"
-            );
-            tried.push(decision.chosen.method);
-        }
+            MethodsOutcome::Failed { tried, failure } => (tried, failure),
+        };
         if failure.is_temporary() {
             return self.defer(job, &run_id, &failure).await;
         }
@@ -470,7 +465,7 @@ impl Worker {
             self.recovery.recheck
         };
         let reason = if tried.len() > 1 {
-            let names: Vec<_> = tried.iter().map(|method| method.label()).collect();
+            let names: Vec<_> = tried.iter().map(|tried| tried.method.label()).collect();
             format!("{} both failed: {failure}", names.join(" and "))
         } else {
             format!("Repair did not restore delivery: {failure}")
@@ -478,54 +473,182 @@ impl Worker {
         self.store.fail(job, &run_id, &reason, retry_in).await
     }
 
-    /// Learns and checks recipes for one connection method: twice, or once for a preset that
-    /// would produce the same recipe again. Publishes on success.
-    async fn repair_method(
+    /// Tries the decided connection method, then the next usable stored alternatives in ranked
+    /// order, until one publishes, a login or CAPTCHA blocks delivery, a temporary failure
+    /// interrupts, or `mode` allows no further method. Each new method is a recorded decision;
+    /// on attach it also gets a read run of its own, recorded in `run_id`.
+    #[allow(clippy::too_many_arguments)]
+    async fn through_methods(
         &self,
         ctx: &ReasoningContext<'_>,
-        run: &RepairRun<'_>,
-        recipe: &mut Recipe,
-        failure: &mut ReadFailure,
+        run_id: &mut String,
+        mut decision: ConnectionDecision,
+        mut recipe: Option<Recipe>,
+        mut failure: Option<ReadFailure>,
+        snapshot: &Snapshot<'_>,
+        mode: Mode<'_>,
+    ) -> Result<MethodsOutcome> {
+        let job = ctx.job;
+        let mut tried: Vec<TriedMethod> = Vec::new();
+        loop {
+            let run = MethodRun {
+                id: run_id,
+                mode,
+                tried: &tried,
+            };
+            let last = match self
+                .try_method(ctx, &run, &mut recipe, &mut failure, snapshot, &decision)
+                .await?
+            {
+                MethodOutcome::Published => return Ok(MethodsOutcome::Published),
+                MethodOutcome::Blocked(error) => return Ok(MethodsOutcome::Blocked(error)),
+                MethodOutcome::Exhausted(error) => error,
+            };
+            tried.push(TriedMethod {
+                method: decision.chosen.method,
+                failure: last.to_string(),
+            });
+            if last.is_temporary() || tried.len() >= mode.max_methods() {
+                return Ok(MethodsOutcome::Failed {
+                    tried,
+                    failure: last,
+                });
+            }
+            let remaining: Vec<_> = decision
+                .alternatives
+                .iter()
+                .filter(|candidate| {
+                    candidate.is_usable() && !tried.iter().any(|t| t.method == candidate.method)
+                })
+                .cloned()
+                .collect();
+            if remaining.is_empty() {
+                return Ok(MethodsOutcome::Failed {
+                    tried,
+                    failure: last,
+                });
+            }
+            let mut next = match self.model.redecide(ctx, remaining).await {
+                Ok(next) => next,
+                Err(error) => {
+                    return Ok(MethodsOutcome::Failed {
+                        tried,
+                        failure: error,
+                    });
+                }
+            };
+            // Unusable candidates, such as TED, stay in the recorded evidence.
+            next.alternatives.extend(
+                decision
+                    .alternatives
+                    .iter()
+                    .filter(|candidate| !candidate.is_usable())
+                    .cloned(),
+            );
+            next.attempt = decision.attempt + 1;
+            next.rationale = format!(
+                "{} failed during {} ({}). {}",
+                decision.chosen.method.label(),
+                mode.as_str(),
+                recipe::sample(&last.to_string(), 300),
+                next.rationale
+            );
+            self.store.record_decision(job, &next).await?;
+            tracing::warn!(
+                portal_id = %job.portal_id,
+                method = next.chosen.method.label(),
+                attempt = next.attempt,
+                mode = mode.as_str(),
+                "Falling back to the next connection method"
+            );
+            if mode.is_attach() {
+                let reason = format!(
+                    "{} failed: {}. Trying {}",
+                    decision.chosen.method.label(),
+                    recipe::sample(&last.to_string(), 300),
+                    next.chosen.method.label()
+                );
+                match self.store.begin_fallback(job, run_id, &reason).await? {
+                    Some(id) => *run_id = id,
+                    None => return Ok(MethodsOutcome::Removed),
+                }
+                // A recipe for another method is no starting point for this one.
+                recipe = None;
+                failure = None;
+            } else {
+                failure = Some(last);
+            }
+            decision = next;
+        }
+    }
+
+    /// Learns and checks recipes for one connection method: twice, or once for a preset that
+    /// would produce the same recipe again. Publishes on success. Learning starts from
+    /// `recipe` and `failure` when both are known. On attach a read without tenders fails.
+    async fn try_method(
+        &self,
+        ctx: &ReasoningContext<'_>,
+        run: &MethodRun<'_>,
+        recipe: &mut Option<Recipe>,
+        failure: &mut Option<ReadFailure>,
         snapshot: &Snapshot<'_>,
         decision: &ConnectionDecision,
-    ) -> Result<RepairOutcome> {
+    ) -> Result<MethodOutcome> {
         let job = ctx.job;
+        let run_id = run.id.as_str();
         let attempts = if Recipe::preset(&decision.chosen).is_some() {
             1
         } else {
             2
         };
         for _ in 0..attempts {
-            let reason = failure.to_string();
-            match self.learn(ctx, Some((&*recipe, &reason)), decision).await {
-                Ok(repaired) => *recipe = repaired,
-                Err(error @ ReadFailure::Blocked(_)) => return Ok(RepairOutcome::Blocked(error)),
+            let reason = failure.as_ref().map(ToString::to_string);
+            let previous = recipe.as_ref().zip(reason.as_deref());
+            let learned = match self.learn(ctx, previous, decision).await {
+                Ok(learned) => recipe.insert(learned),
+                Err(error @ ReadFailure::Blocked(_)) => return Ok(MethodOutcome::Blocked(error)),
+                Err(error) if error.is_temporary() => return Ok(MethodOutcome::Exhausted(error)),
                 Err(error) => {
-                    *failure = error;
+                    *failure = Some(error);
                     continue;
                 }
-            }
-            let attempt = match recipe::read(ctx.http, ctx.url, recipe).await {
-                Ok(candidate) => self.check(ctx, recipe, candidate, snapshot, true).await,
+            };
+            let attempt = match self.read(ctx, run_id, learned).await {
+                Ok(candidate) if run.mode.is_attach() && candidate.tenders.is_empty() => Err((
+                    Stage::Read,
+                    ReadFailure::Incomplete(format!(
+                        "{} read found no tenders",
+                        decision.chosen.method.label()
+                    )),
+                )),
+                Ok(candidate) => self.check(ctx, learned, candidate, snapshot, true).await,
                 Err(error) => Err((Stage::Read, error)),
             };
             let error = match attempt {
                 Ok(candidate) => {
-                    let note = repair_note(job.recipe.as_deref(), recipe, decision, run.broke);
-                    self.publish(job, run.id, recipe, candidate, &note).await?;
-                    return Ok(RepairOutcome::Published);
+                    let note = run.note(job.recipe.as_deref(), learned, decision);
+                    self.publish(job, run_id, learned, candidate, &note).await?;
+                    return Ok(MethodOutcome::Published);
                 }
                 Err((stage, error)) => {
-                    log_failed_recipe(&job.portal_id, run.id, recipe, stage, &error);
+                    log_failed_recipe(&job.portal_id, run_id, learned, stage, &error);
                     error
                 }
             };
-            if let ReadFailure::Blocked(_) = error {
-                return Ok(RepairOutcome::Blocked(error));
+            match error {
+                ReadFailure::Blocked(_) => return Ok(MethodOutcome::Blocked(error)),
+                error if error.is_temporary() => return Ok(MethodOutcome::Exhausted(error)),
+                error => *failure = Some(error),
             }
-            *failure = error;
         }
-        Ok(RepairOutcome::Exhausted)
+        Ok(MethodOutcome::Exhausted(failure.take().unwrap_or_else(
+            || {
+                ReadFailure::Incomplete(format!(
+                    "{} could not be learned",
+                    decision.chosen.method.label()
+                ))
+            },
+        )))
     }
 
     async fn publish(
@@ -547,12 +670,6 @@ impl Worker {
             )
             .await
     }
-}
-
-/// A repair run in progress and the run reason of the read that started it.
-struct RepairRun<'a> {
-    id: &'a str,
-    broke: &'a str,
 }
 
 /// The run reason of a read that broke: the failure and what was being served before it.
@@ -644,12 +761,122 @@ fn recipe_changes(path: &str, before: &Value, after: &Value, changes: &mut Vec<S
 
 /// Connection methods a repair tries before the portal is failed.
 const MAX_METHODS: usize = 2;
+/// Connection methods a first attach tries before the portal is failed.
+const MAX_ATTACH_METHODS: usize = 3;
 
-enum RepairOutcome {
+/// Why methods are being tried: a first attach without a recipe, or a repair of one. A
+/// repair carries the run reason of the read that broke.
+#[derive(Clone, Copy, Debug)]
+enum Mode<'a> {
+    Attach,
+    Repair(&'a str),
+}
+
+impl Mode<'_> {
+    fn is_attach(self) -> bool {
+        matches!(self, Self::Attach)
+    }
+
+    fn max_methods(self) -> usize {
+        match self {
+            Self::Attach => MAX_ATTACH_METHODS,
+            Self::Repair(_) => MAX_METHODS,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attach => "attach",
+            Self::Repair(_) => "repair",
+        }
+    }
+}
+
+/// The run a connection method is tried in, and the methods that failed before it.
+struct MethodRun<'a> {
+    id: &'a String,
+    mode: Mode<'a>,
+    tried: &'a [TriedMethod],
+}
+
+impl MethodRun<'_> {
+    /// The run reason when this method publishes.
+    fn note(
+        &self,
+        previous: Option<&str>,
+        recipe: &Recipe,
+        decision: &ConnectionDecision,
+    ) -> String {
+        match self.mode {
+            Mode::Repair(broke) => repair_note(previous, recipe, decision, broke),
+            Mode::Attach if self.tried.is_empty() => "Attached and verified".to_owned(),
+            Mode::Attach => {
+                let failed: Vec<_> = self
+                    .tried
+                    .iter()
+                    .map(|tried| tried.method.label())
+                    .collect();
+                format!(
+                    "Attached and verified via {} after {} failed",
+                    decision.chosen.method.label(),
+                    failed.join(" and ")
+                )
+            }
+        }
+    }
+}
+
+enum MethodOutcome {
     Published,
     Blocked(ReadFailure),
-    /// Every attempt on this method failed; the failure holds the last reason.
-    Exhausted,
+    /// Every attempt on this method failed, or a temporary failure cut it short.
+    Exhausted(ReadFailure),
+}
+
+enum MethodsOutcome {
+    Published,
+    Blocked(ReadFailure),
+    /// The portal was removed while methods were tried.
+    Removed,
+    /// No method delivered. `failure` is the last one, which decides between deferring and
+    /// failing.
+    Failed {
+        tried: Vec<TriedMethod>,
+        failure: ReadFailure,
+    },
+}
+
+/// A connection method that did not deliver, with its last failure.
+struct TriedMethod {
+    method: ConnectionMethod,
+    failure: String,
+}
+
+/// The `failed` reason of an attach, naming every method tried with its last failure.
+fn attach_reason(tried: &[TriedMethod]) -> String {
+    let details: Vec<_> = tried
+        .iter()
+        .map(|tried| {
+            format!(
+                "{}: {}",
+                tried.method.label(),
+                recipe::sample(&tried.failure, 300)
+            )
+        })
+        .collect();
+    match tried {
+        [] => "Attach tried no connection method".into(),
+        [only] => format!("{} failed: {}", only.method.label(), only.failure),
+        _ => {
+            let names: Vec<_> = tried.iter().map(|tried| tried.method.label()).collect();
+            let (last, rest) = names.split_last().expect("several methods");
+            format!(
+                "Attach tried {} and {last}; none delivered verified tenders. {}",
+                rest.join(", "),
+                details.join("; ")
+            )
+        }
+    }
 }
 
 /// Where a recipe attempt failed: while reading the portal, when the read was compared with
