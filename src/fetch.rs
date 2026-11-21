@@ -24,6 +24,8 @@ const FILE_LIMIT: u64 = 250 * 1024 * 1024;
 /// The most bytes one ZIP may expand to, counted as they are decompressed.
 const ARCHIVE_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+/// The longest one probe sample may take, including its wait for the rate limit.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct Fetcher {
@@ -209,22 +211,34 @@ impl PortalHttp {
         Self::read_page(self.request(url, "page headers").await?, "page body").await
     }
 
-    /// Reads a page like `page`, keeping the status and content type for probing.
+    /// Reads a page like `page`, keeping the status and content type for probing. A probe is a
+    /// cheap check, so each sample gets `PROBE_TIMEOUT` rather than the client's read timeout:
+    /// an optional route that hangs, such as a slow sitemap, is skipped instead of stalling.
     pub(crate) async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
-        let response = self.request(url, "probe headers").await?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let page = Self::read_page(response, "probe body").await?;
-        Ok(Sample {
-            url: page.url,
-            status,
-            content_type,
-            body: page.body,
-        })
+        let host = url.host_str().unwrap_or("unknown host").to_owned();
+        let read = async {
+            let response = self.request(url, "probe headers").await?;
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let page = Self::read_page(response, "probe body").await?;
+            Ok(Sample {
+                url: page.url,
+                status,
+                content_type,
+                body: page.body,
+            })
+        };
+        tokio::time::timeout(PROBE_TIMEOUT, read)
+            .await
+            .unwrap_or_else(|_| {
+                Err(ReadFailure::Temporary(format!(
+                    "Portal fetch failed on {host} (probe): request timed out"
+                )))
+            })
     }
 
     pub(crate) async fn page_unless_seen(
