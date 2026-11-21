@@ -39,6 +39,27 @@ async fn main() -> Result<()> {
         .context("WATCHTOWER_CONCURRENCY must be a positive integer")?
         .unwrap_or(watchtower::worker::CONCURRENCY);
     anyhow::ensure!(concurrency > 0, "WATCHTOWER_CONCURRENCY must be positive");
+    // Development-only switches. Both are off unless set, and the Dockerfile sets neither.
+    let raw_rps = std::env::var("WATCHTOWER_DEV_RPS").ok();
+    let rps = watchtower::fetch::dev_rps(raw_rps.as_deref())?;
+    if rps > 1.0 {
+        tracing::warn!(
+            requested = raw_rps.as_deref().unwrap_or_default(),
+            rps,
+            max = watchtower::fetch::MAX_DEV_RPS,
+            "WATCHTOWER_DEV_RPS raises the per-portal request rate above 1 per second; development only"
+        );
+    }
+    let mut fetcher = Fetcher::new(files.clone())?.with_rate(rps);
+    if let Some(cache) = std::env::var_os("WATCHTOWER_DEV_CACHE").filter(|value| !value.is_empty())
+    {
+        let cache = PathBuf::from(cache);
+        tracing::warn!(
+            cache = %cache.display(),
+            "WATCHTOWER_DEV_CACHE answers repeated portal requests from disk; development only"
+        );
+        fetcher = fetcher.with_cache(cache)?;
+    }
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     let stop = CancellationToken::new();
@@ -47,7 +68,7 @@ async fn main() -> Result<()> {
         store: store.clone(),
         jobs: jobs.clone(),
         interval,
-        fetcher: Fetcher::new(files.clone())?,
+        fetcher,
         model: Arc::new(OpenAi::new(store.clone())?),
         recovery,
         concurrency,
