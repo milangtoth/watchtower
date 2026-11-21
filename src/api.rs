@@ -114,6 +114,7 @@ pub fn router(api: Api) -> Router {
         .route("/portals/{id}/refresh", axum::routing::post(refresh))
         .route("/portals/{id}/tenders", get(tenders))
         .route("/portals/{id}/runs", get(runs))
+        .route("/portals/{id}/connection", get(connection))
         .route("/files/{id}", get(file))
         .merge(crate::dashboard::routes())
         .merge(crate::voice::router())
@@ -268,6 +269,16 @@ async fn runs(
     Ok(Json(
         api.store.runs(&id).await?.ok_or_else(ApiError::missing)?,
     ))
+}
+
+/// The portal's latest connection decision, or `null` before one exists. Dashboard only; not
+/// part of the challenge API.
+async fn connection(
+    State(api): State<Api>,
+    ExtractPath(id): ExtractPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    api.store.portal(&id).await?.ok_or_else(ApiError::missing)?;
+    Ok(Json(api.store.latest_decision(&id).await?))
 }
 
 async fn file(

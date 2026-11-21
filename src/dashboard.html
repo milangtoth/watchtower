@@ -36,7 +36,7 @@
 </script>
 
 <link rel="preload" href="/design/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/dashboard.css?v=2">
+<link rel="stylesheet" href="/dashboard.css?v=3">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to dashboard</a>
@@ -232,6 +232,74 @@
     return details;
   }
 
+  const METHODS = { html: 'HTML', json: 'JSON', ocds: 'OCDS', feed: 'Feed', sitemap: 'Sitemap', ted: 'TED' };
+  const methodBadge = method => {
+    const badge = node('span', 'method-badge', METHODS[method] ?? String(method).toUpperCase());
+    badge.dataset.method = method;
+    return badge;
+  };
+  const score = value => typeof value === 'number' ? value.toFixed(2) : '—';
+
+  // One probed connection method: where it starts, how it was found and what the probe saw.
+  function candidateItem(candidate, rank) {
+    const item = node('li', 'candidate');
+    const head = node('div', 'candidate-head');
+    head.append(node('span', 'candidate-rank', rank + '.'), methodBadge(candidate.method),
+      node('span', 'candidate-score', 'Score ' + score(candidate.score)));
+    const entry = link(candidate.entryUrl, candidate.entryUrl, 'candidate-url');
+    entry.rel = 'noopener noreferrer';
+    const items = candidate.sampleItems === 1 ? '1 sample item' : amount(candidate.sampleItems ?? 0) + ' sample items';
+    const evidence = node('p', 'candidate-evidence', ['HTTP ' + candidate.httpStatus, items,
+      candidate.hasPagination ? 'paginated' : null, 'via ' + candidate.foundVia].filter(Boolean).join(' · '));
+    const fields = node('p', 'candidate-fields',
+      candidate.fieldsSeen?.length ? 'Fields seen: ' + candidate.fieldsSeen.join(', ') : 'No tender fields seen');
+    item.append(head, /^https?:\/\//i.test(candidate.entryUrl) ? entry : node('span', 'candidate-url', candidate.entryUrl),
+      evidence, fields);
+    return item;
+  }
+
+  // How Watchtower connects to the portal: the chosen method, why, and the ranked fallbacks.
+  function connectionDetails(base) {
+    const details = node('details', 'portal-details connection-details');
+    const summary = node('summary');
+    const label = node('span', 'connection-summary', 'Connection');
+    summary.append(label);
+    const content = node('div', 'detail-content');
+    details.append(summary, content);
+    get(base + '/connection').then(decision => {
+      if (!decision) {
+        label.append(node('span', 'connection-pending', 'Not decided yet'));
+        content.replaceChildren(node('p', null, 'Watchtower has not chosen a connection method for this portal yet.'));
+        return;
+      }
+      label.append(methodBadge(decision.chosen.method));
+      if (decision.attempt > 1) label.append(node('span', 'connection-attempt', 'Attempt ' + decision.attempt));
+      const chosen = node('ol', 'record-list candidate-list');
+      chosen.append(candidateItem(decision.chosen, 1));
+      const rationale = node('blockquote', 'connection-rationale', decision.rationale);
+      const history = decision.attempt > 1
+        ? 'Attempt ' + decision.attempt + ': the method changed after repairs on '
+          + (decision.attempt === 2 ? 'the previous method' : (decision.attempt - 1) + ' earlier methods') + ' failed.'
+        : 'Attempt 1: chosen when the portal was attached.';
+      const meta = node('p', 'connection-meta', 'Decided by ' + decision.model + ' · ' + date(decision.decidedAt));
+      const parts = [node('h4', null, 'Chosen method'), chosen, node('h4', null, 'Why'), rationale, meta,
+        node('h4', null, 'Decision history'), node('p', null, history), node('h4', null, 'Ranked alternatives')];
+      if (decision.alternatives.length) {
+        const alternatives = node('ol', 'record-list candidate-list');
+        decision.alternatives.forEach((candidate, index) => alternatives.append(candidateItem(candidate, index + 2)));
+        parts.push(alternatives);
+      } else {
+        parts.push(node('p', null, 'No other method was found.'));
+      }
+      parts.push(link('Connection API response ↗', base + '/connection', 'detail-api'));
+      content.replaceChildren(...parts);
+    }).catch(error => {
+      label.append(node('span', 'connection-pending', 'Unavailable'));
+      content.replaceChildren(node('p', null, 'Could not load the connection decision (' + error.message + '). Reload to retry.'));
+    });
+    return details;
+  }
+
   function portalCard(portal) {
     const card = node('article', 'portal-card');
     card.dataset.state = portal.state;
@@ -264,7 +332,8 @@
     }
     const stats = node('div', 'card-stats');
     stats.append(held, node('span', null, 'Last verified · ' + date(portal.lastSuccessAt)));
-    card.append(top, node('p', 'portal-reason', portal.reason), stats, portalDetails(base, readTenders));
+    card.append(top, node('p', 'portal-reason', portal.reason), stats, connectionDetails(base),
+      portalDetails(base, readTenders));
     return card;
   }
 

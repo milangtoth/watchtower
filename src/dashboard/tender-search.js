@@ -1,6 +1,7 @@
 const RESULT_LIMIT = 8;
 const PORTAL_BATCH_SIZE = 6;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const CPV_PREFIX_LIMIT = 8;
 
 function fold(value) {
   return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
@@ -15,15 +16,20 @@ function isDate(value) {
 function normalizeFilters(input) {
   const query = String(input.query ?? "").trim().slice(0, 120);
   const country = String(input.country ?? "").trim().toUpperCase();
-  const cpv = String(input.cpv ?? "").trim();
+  // One prefix or several, so a sector such as IT can span CPV divisions 72, 48 and 302.
+  const cpv = [...new Set(String(input.cpv ?? "").split(/[\s,;]+/).filter(Boolean))];
+  const sector = String(input.sector ?? "").trim().slice(0, 60);
   const deadlineFrom = String(input.deadline_from ?? "").trim();
   const deadlineTo = String(input.deadline_to ?? "").trim();
 
   if (country && !/^[A-Z]{2}$/.test(country)) {
     throw new Error("Use a two-letter country code, such as NL or DE.");
   }
-  if (cpv && !/^\d{2,8}$/.test(cpv)) {
-    throw new Error("Use a CPV code or prefix of two to eight digits.");
+  if (cpv.some(prefix => !/^\d{2,8}$/.test(prefix))) {
+    throw new Error("Use CPV codes or prefixes of two to eight digits, separated by commas.");
+  }
+  if (cpv.length > CPV_PREFIX_LIMIT) {
+    throw new Error(`Use at most ${CPV_PREFIX_LIMIT} CPV prefixes.`);
   }
   if ([deadlineFrom, deadlineTo].some(date => date && !isDate(date))) {
     throw new Error("Use dates in YYYY-MM-DD format.");
@@ -32,7 +38,7 @@ function normalizeFilters(input) {
     throw new Error("The closing date range is reversed.");
   }
 
-  return { query, country, cpv, deadlineFrom, deadlineTo };
+  return { query, country, cpv, sector: cpv.length ? sector : "", deadlineFrom, deadlineTo };
 }
 
 async function readList(path, signal) {
@@ -46,7 +52,7 @@ async function readList(path, signal) {
 function matches(tender, filters, words) {
   if (tender.status !== "open") return false;
   if (filters.country && tender.placeOfPerformance?.countryCode !== filters.country) return false;
-  if (filters.cpv && !tender.cpvCodes?.some(code => code.startsWith(filters.cpv))) return false;
+  if (filters.cpv.length && !tender.cpvCodes?.some(code => filters.cpv.some(prefix => code.startsWith(prefix)))) return false;
 
   const date = tender.submissionDeadline?.slice(0, 10);
   if (filters.deadlineFrom && (!date || date < filters.deadlineFrom)) return false;
@@ -108,6 +114,9 @@ export async function searchOpenTenders(input, signal) {
   const countries = new Set();
   const results = [];
   let unavailablePortals = 0;
+  // Open tenders a CPV filter cannot judge, because their portal publishes no CPV codes for them.
+  let withoutCpv = 0;
+  const portalsWithoutCpv = new Set();
 
   for (let start = 0; start < portals.length; start += PORTAL_BATCH_SIZE) {
     signal.throwIfAborted();
@@ -128,6 +137,11 @@ export async function searchOpenTenders(input, signal) {
         const country = tender.placeOfPerformance?.countryCode;
         if (country) countries.add(country);
         if (matches(tender, filters, words)) results.push({ ...tender, portal });
+        else if (filters.cpv.length && !tender.cpvCodes?.length
+          && matches(tender, { ...filters, cpv: [] }, words)) {
+          withoutCpv++;
+          portalsWithoutCpv.add(portalName(portal));
+        }
       }
     }
   }
@@ -147,5 +161,7 @@ export async function searchOpenTenders(input, signal) {
     unavailablePortals,
     portals: [...portals.map(portal => portalSummary(portal, true)), ...portalsWithoutData],
     portalsWithoutData: portalsWithoutData.length,
+    tendersWithoutCpv: withoutCpv,
+    portalsWithoutCpv: [...portalsWithoutCpv].sort(),
   };
 }
