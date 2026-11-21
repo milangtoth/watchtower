@@ -971,7 +971,8 @@ const COMPARED_FIELDS: &[&str] = &[
 ///
 /// Returns an error when the read is incomplete: it has no positive end-of-list evidence,
 /// it skipped a listing page that the last verified read fetched and that is still linked, or
-/// more than half of the open tenders (at least two) vanished while the listing shows no empty
+/// more than half of the open tenders (at least two) vanished from a read that is not windowed
+/// while the listing shows no empty
 /// state. Otherwise returns a review. Its signals are empty only when nothing suggests the read
 /// is wrong, in which case a repeat read publishes without a model call.
 fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, ReadFailure> {
@@ -1024,13 +1025,16 @@ fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, 
         .map(|published| &published.tender)
         .filter(|tender| tender.status == TenderStatus::Open)
         .collect();
+    // A windowed read leaves out open tenders not updated within its window, and publication
+    // keeps them, so their absence is no sign that the read is wrong.
     let vanished: Vec<&Tender> = open
         .iter()
         .copied()
         .filter(|tender| {
-            tender
-                .key()
-                .is_none_or(|key| !candidates.contains_key(&key))
+            !evidence.windowed
+                && tender
+                    .key()
+                    .is_none_or(|key| !candidates.contains_key(&key))
         })
         .collect();
     if vanished.len() >= 2 && vanished.len() * 2 > open.len() && !evidence.empty_state {
@@ -1296,6 +1300,7 @@ mod tests {
                 unfollowed_links: Vec::new(),
                 samples: Vec::new(),
                 listing_links: HashSet::new(),
+                windowed: false,
             },
             tenders,
         }
