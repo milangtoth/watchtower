@@ -317,3 +317,107 @@ portals:
     entry_url: https://platformazakupowa.pl/pn/wszz_torun/proceedings
     note: The public HTML lists the same tender detail URLs as the baseline with verified attachments.
     samples: PL.json
+
+  - name: Tenders Electronic Daily
+    url: https://ted.europa.eu/en/search/result
+    country: EU
+    software: TED
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://api.ted.europa.eu/v3/notices/search
+    readiness: needs-five-download-baseline
+    note: Added from the Tender Atlas source list. Atlas reads the public anonymous search API, which returns notice IDs, buyers, CPV codes, deadlines and lot document URLs. Not yet run through Watchtower.
+    evidence: https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html
+
+  - name: Bekanntmachungsservice
+    url: https://oeffentlichevergabe.de/ui/de/search
+    country: DE
+    software: Bekanntmachungsservice
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: ocds
+    entry_url: https://oeffentlichevergabe.de/api/notice-exports?format=ocds.zip
+    readiness: needs-five-download-baseline
+    note: Added from the Tender Atlas source list. Atlas reads the daily federal OCDS export, which lags by one day. Notice PDFs are at /api/notices/{id}?format=pdf. Not yet run through Watchtower.
+    evidence: https://oeffentlichevergabe.de/ui/de/publicationPolicy
+
+  - name: Plataforma de Contratación del Sector Público
+    url: https://contrataciondelsectorpublico.gob.es/wps/portal/plataforma
+    country: ES
+    software: PLACSP
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: atom
+    entry_url: https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom
+    readiness: needs-five-download-baseline
+    note: Added from the Tender Atlas source list. Atlas reads the national Atom syndication feed of contracting-profile notices with CODICE XML entries, excluding minor contracts. Not yet run through Watchtower.
+    evidence: https://contrataciondelsectorpublico.gob.es/wps/portal/DatosAbiertos
+
+  - name: SEAP e-licitatie.ro
+    url: https://www.e-licitatie.ro/pub/notices/contract-notices/list/0/0
+    country: RO
+    software: SEAP
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://www.e-licitatie.ro/api-pub/NoticeCommon/GetCNoticeList/
+    readiness: needs-five-download-baseline
+    note: The Angular listing POSTs a JSON filter to this public route (about 190 contract notices and 390 award notices a day). Detail pages are routed per notice type, e.g. /pub/notices/c-notice/v2/view/{cNoticeId} and /pub/notices/simplified-notice/v2/view/{cNoticeId}. Collected by Tender Atlas; not yet run through Watchtower.
+    evidence: https://www.e-licitatie.ro/pub/notices/contract-notices/list/0/0
+
+  - name: simap.ch
+    url: https://www.simap.ch/en/search
+    country: CH
+    software: simap
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://www.simap.ch/api/publications/v2/project/project-search?newestPublicationFrom=2026-11-19&newestPublicationUntil=2026-11-19
+    readiness: needs-five-download-baseline
+    note: The search UI reads this public JSON route, paged by a lastItem cursor (20 per page, about 130 publications a day). Detail pages are /en/project-detail/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    evidence: https://www.simap.ch/
+
+  - name: KIMDIS
+    url: https://cerpp.eprocurement.gov.gr/kimds2/unprotected/searchNotice.htm
+    country: GR
+    software: KIMDIS
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0
+    readiness: needs-five-download-baseline
+    note: The open-data API takes a POSTed date range and returns about 1,300 notices a day, 50 per page. Each notice PDF is public at /khmdhs-opendata/notice/attachment/{referenceNumber}. Bursts get HTTP 429 with no Retry-After. Collected by Tender Atlas; not yet run through Watchtower.
+    evidence: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/swagger-ui/index.html
+
+  - name: Doffin
+    url: https://doffin.no/search
+    country: NO
+    software: Doffin
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://api.doffin.no/webclient/api/v2/search-api/search
+    readiness: needs-five-download-baseline
+    note: The search UI POSTs to this keyless web-client route; the documented public API needs a subscription key. A search returns at most 1,000 hits, so query by publication date. Detail pages are /notices/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    evidence: https://doffin.no/
+
+  - name: Latvia EIS
+    url: https://www.eis.gov.lv/EKEIS/Supplier
+    country: LV
+    software: EIS
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: csv
+    entry_url: https://data.gov.lv/dati/api/3/action/package_show?id=izsludinato-iepirkumu-datu-grupa
+    readiness: needs-five-download-baseline
+    note: Announced e-tenders are published as a yearly CSV refreshed daily (one row per lot), each linking to /EKEIS/Supplier/Procurement/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    evidence: https://data.gov.lv/dati/lv/dataset/izsludinato-iepirkumu-datu-grupa

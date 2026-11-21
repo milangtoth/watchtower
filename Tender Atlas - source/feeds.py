@@ -32,6 +32,13 @@ NL = "https://www.tenderned.nl/cms/nl/aanbesteden-in-cijfers/datasets-aanbestedi
 IE = "https://data.gov.ie/dataset/contract-notices-published-on-etenders"
 ES = "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3"
 PL = "https://ezamowienia.gov.pl/mo-board/api/v1/notice"
+RO = "https://www.e-licitatie.ro/api-pub/NoticeCommon/"
+RO_HEADERS = {"Accept":"application/json", "Origin":"https://www.e-licitatie.ro",
+              "Referer":"https://www.e-licitatie.ro/pub/notices/contract-notices/list/0/0"}
+CH = "https://www.simap.ch/api/publications/v2/project/project-search"
+GR = "https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice"
+NO = "https://api.doffin.no/webclient/api/v2/search-api/search"
+LV = "https://data.gov.lv/dati/api/3/action/package_show?id=izsludinato-iepirkumu-datu-grupa"
 SOURCES = {
     "ted": ("TED", "Tenders Electronic Daily", "European Union", "EU-wide notices, including planning, competitions, awards and changes. Full XML is linked from each record.", "https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html"),
     "de": ("DÖE", "Bekanntmachungsservice", "Germany", "Daily federal procurement exports in OCDS format. The most recent available file covers yesterday.", "https://oeffentlichevergabe.de/ui/de/publicationPolicy"),
@@ -42,6 +49,11 @@ SOURCES = {
     "ie": ("eTenders", "eTenders open data", "Ireland", "Office of Government Procurement’s historical competitions and awards. Quarterly archive, indexed by notice, award or cancellation date. Rows without any of those dates are omitted.", IE),
     "uk": ("FTS", "Find a Tender", "United Kingdom", "UK procurement releases across all stages from the Cabinet Office. Collected by update date.", "https://www.gov.uk/government/publications/open-contracting"),
     "cf": ("CF", "Contracts Finder", "United Kingdom", "Cabinet Office daily OCDS exports with tender, award, buyer and supplier information.", "https://www.gov.uk/government/publications/open-contracting"),
+    "ro": ("SEAP", "Sistemul Electronic de Achiziții Publice", "Romania", "National contract notices, simplified notices and award notices from e-licitatie.ro, including those below the EU thresholds that never reach TED.", "https://www.e-licitatie.ro/pub/notices/contract-notices/list/0/0"),
+    "ch": ("simap", "simap.ch", "Switzerland", "Federal, cantonal and municipal publications: tenders, awards, advance notices and revocations.", "https://www.simap.ch/"),
+    "gr": ("KIMDIS", "Κεντρικό Ηλεκτρονικό Μητρώο Δημοσίων Συμβάσεων", "Greece", "Every call for tenders registered in the national public contracts register, including direct awards below the EU thresholds. Each record links to the official notice PDF.", "https://cerpp.eprocurement.gov.gr/khmdhs-opendata/swagger-ui/index.html"),
+    "no": ("Doffin", "Doffin", "Norway", "Norway’s national notice database: competitions, advisory and intent notices, and contract results.", "https://doffin.no/"),
+    "lv": ("EIS", "Elektronisko iepirkumu sistēma", "Latvia", "Procurements announced through Latvia’s e-tendering system, one record per lot, from the yearly open-data file refreshed daily.", "https://data.gov.lv/dati/lv/dataset/izsludinato-iepirkumu-datu-grupa"),
 }
 COUNTRIES = json.loads((ROOT / "countries.json").read_text(encoding="utf8"))
 TED_FIELDS = """publication-number publication-date notice-title title-proc buyer-name buyer-country form-type notice-type description-proc description-lot classification-cpv estimated-value-proc estimated-value-cur-proc result-value-notice result-value-cur-notice deadline-receipt-tender-date-lot deadline-receipt-request procedure-identifier internal-identifier-proc procedure-type winner-name place-of-performance document-url-lot buyer-internet-address official-language notice-version ojs-number""".split()
@@ -71,15 +83,15 @@ def fetch(url, body=None):
     with get(url, body) as response:
         return response.read()
 
-def resource(url, body=None, discovered_from=None):
-    with get(url, body) as response:
+def resource(url, body=None, discovered_from=None, headers=None):
+    with get(url, body, headers) as response:
         content = response.read()
         document = prov.captured(url, response, body, discovered_from)
     document["response_sha256"] = hashlib.sha256(content).hexdigest()
     return content, document
 
-def json_resource(url, body=None, discovered_from=None):
-    content, document = resource(url, body, discovered_from)
+def json_resource(url, body=None, discovered_from=None, headers=None):
+    content, document = resource(url, body, discovered_from, headers)
     return json.loads(content), document
 
 def js(url, body=None):
@@ -470,4 +482,180 @@ def spain(start,end,cache):
         url = urljoin(ES,name)
         time.sleep(.2)
 
-COLLECTORS = dict(ted=ted,de=germany,fr=france,es=spain,pl=poland,nl=netherlands,ie=ireland,uk=uk,cf=cf)
+def ro_url(kind, n):
+    """Public SEAP page for a list item. Routes come from the publisher's own Angular app."""
+    v1 = n.get("sysNoticeVersionId") == 1
+    if kind == "ca":
+        # Award list types: 3 CAN, 13 RFQA, 16 PCA, 18 SCNA, 20 RFDA (mirrors the app's navigateToView switch).
+        typ = n.get("sysNoticeTypeId")
+        path = {13:("ca-notices/view-rfq/", "ca-notices/view-rfq/v1/"), 20:("ca-notices/view-rfq/", "ca-notices/view-rfq/v1/"),
+                16:("ca-notices-pc/view/", "ca-notices/view-pc/v1/"), 18:("ca-notices/view-snc/", "ca-notices/view-scn/v1/")
+                }.get(typ, ("ca-notices/view-c/", "ca-notices/view-c/v1/"))[v1]
+        return "https://www.e-licitatie.ro/pub/notices/" + path + str(n["caNoticeId"])
+    path = "simplified-notice" if str(n.get("noticeNo","")).startswith("SCN") else "c-notice"
+    return f"https://www.e-licitatie.ro/pub/notices/{path}/{'v1' if v1 else 'v2'}/view/{n['cNoticeId']}"
+
+def romania(start, end, cache):
+    for endpoint, kind in (("GetCNoticeList", "c"), ("GetCANoticeList", "ca")):
+        url = RO + endpoint + "/"
+        page = 0
+        while True:
+            body = {"sysNoticeTypeIds":[], "sortProperties":[], "pageSize":100, "pageIndex":page, "hasUnansweredQuestions":False,
+                    "startPublicationDate":start+"T00:00:00.000Z", "endPublicationDate":end+"T23:59:59.999Z"}
+            data, document = json_resource(url, body, headers=RO_HEADERS)
+            items = data.get("items") or []
+            batch = []
+            for i, n in enumerate(items):
+                state = flat((n.get("sysNoticeState") or {}).get("text")).lower()
+                award = kind == "ca"
+                stage = "Cancellation" if "anulat" in state else "Award" if award else "Tender"
+                code, _, label = flat(n.get("cpvCodeAndName")).partition(" - ")
+                amount = n.get("ronContractValue") if award else n.get("estimatedValueRon")
+                detail = " · ".join(x for x in (flat((n.get("sysProcedureType") or {}).get("text")),
+                                                  flat((n.get("sysAcquisitionContractType") or {}).get("text")), label) if x)
+                # The list filters on publication date but carries only the later state date, so the queried day is the record date.
+                record = row(n["noticeNo"], n.get("contractTitle"), re.sub(r"^\d+\s*-\s*", "", flat(n.get("contractingAuthorityNameAndFN"))),
+                             "Romania", stage, start, ro_url(kind, n), n, url, description=detail,
+                             deadline=n.get("maxTenderReceiptDeadline"), cpv=code.split("-")[0],
+                             amount="" if amount in (None, 0) else amount, currency=n.get("currencyCode") or "RON",
+                             value_type="Award value" if award else "Estimated value", process=n.get("procedureId"))
+                batch.append(prov.located(record, document, prov.json_location(f"/items/{i}")))
+            yield batch
+            page += 1
+            if not items or page * 100 >= data.get("total", 0):
+                break
+
+CH_STAGES = {"tender":"Tender", "award":"Award", "advance_notice":"Planning", "direct_award":"Award", "revocation":"Cancellation",
+             "abandonment":"Cancellation", "selective_offering_phase":"Tender", "participant_selection":"Evaluation", "correction":"Amendment"}
+
+def switzerland(start, end, cache):
+    params = dict(newestPublicationFrom=start, newestPublicationUntil=end)
+    seen = set()
+    while True:
+        url = query(CH, **params)
+        data, document = json_resource(url, headers={"Accept":"application/json"})
+        projects = data.get("projects") or []
+        batch = []
+        for i, p in enumerate(projects):
+            stage = "Amendment" if p.get("corrected") else CH_STAGES.get(p.get("pubType"), "Other")
+            record = row(p.get("publicationNumber") or p["publicationId"], p.get("title"), p.get("procOfficeName"), "Switzerland", stage,
+                         p.get("publicationDate"), "https://www.simap.ch/en/project-detail/" + quote(p["id"]), p, url,
+                         description=" · ".join(x for x in (p.get("projectType"), p.get("projectSubType"), p.get("processType")) if x),
+                         process=p.get("projectNumber"))
+            batch.append(prov.located(record, document, prov.json_location(f"/projects/{i}")))
+        yield batch
+        cursor = (data.get("pagination") or {}).get("lastItem")
+        if len(projects) < (data.get("pagination") or {}).get("itemsPerPage", 20) or not cursor:
+            return
+        if cursor in seen:
+            raise ValueError("simap returned the same page twice.")
+        seen.add(cursor)
+        params["lastItem"] = cursor
+
+def gr_value(field):
+    """KIMDIS codes are {key, value} pairs; the value is the readable label."""
+    return flat(field.get("value")) if isinstance(field, dict) else flat(field)
+
+def greece(start, end, cache):
+    page = 0
+    while True:
+        url = query(GR, page=page)
+        data, document = json_resource(url, {"dateFrom":start, "dateTo":end}, headers={"Accept":"application/json"})
+        batch = []
+        for i, n in enumerate(data.get("content") or []):
+            items = n.get("objectDetails") or []
+            stage = "Cancellation" if n.get("cancelled") else "Amendment" if n.get("amendPreviousNotice") else "Tender"
+            cpv = [c["key"].split("-")[0] for item in items for c in item.get("cpvs") or [] if c.get("key")]
+            record = row(n["referenceNumber"], n.get("title"), gr_value(n.get("organization")), "Greece", stage, n.get("submissionDate"),
+                         GR + "/attachment/" + quote(n["referenceNumber"]), n, url,
+                         description=" · ".join(x for x in (gr_value(n.get("noticeType")), gr_value(n.get("typeOfProcedure")),
+                                                           gr_value(n.get("contractType")), flat(n.get("nutsCity"))) if x),
+                         deadline=n.get("finalSubmissionDate"), cpv=list(dict.fromkeys(cpv)), amount=n.get("totalCostWithoutVAT"),
+                         currency="EUR" if n.get("totalCostWithoutVAT") is not None else "", value_type="Estimated value excl. VAT",
+                         process=n.get("protocolNumber"))
+            batch.append(prov.located(record, document, prov.json_location(f"/content/{i}")))
+        yield batch
+        if data.get("last", True) or not data.get("content"):
+            return
+        page += 1
+        time.sleep(3)  # KIMDIS answers bursts with HTTP 429 and sends no Retry-After.
+
+NO_STAGES = {"ANNOUNCEMENT_OF_COMPETITION":"Tender", "DYNAMIC_PURCHASING_SCHEME":"Tender", "ADVISORY_NOTICE":"Planning",
+             "PRE_ANNOUNCEMENT":"Planning", "ANNOUNCEMENT_OF_INTENT":"Direct award intent",
+             "ANNOUNCEMENT_OF_CONCLUSION_OF_CONTRACT":"Award", "CANCELLED_OR_MISSING_CONCLUSION_OF_CONTRACT":"Cancellation"}
+
+def norway(start, end, cache):
+    page = 1
+    while True:
+        body = {"numHitsPerPage":100, "page":page, "searchString":"", "sortBy":"PUBLICATION_DATE_DESC",
+                "facets":{"publicationDate":{"from":start, "to":end}}}
+        data, document = json_resource(NO, body, headers={"Accept":"application/json"})
+        if data.get("numHitsTotal", 0) > data.get("numHitsAccessible", 1000):
+            raise ValueError("Doffin matched more notices than it lets a search return. Collect a shorter date range.")
+        hits = data.get("hits") or []
+        batch = []
+        for i, n in enumerate(hits):
+            value = n.get("estimatedValue") or {}
+            stage = "Cancellation" if n.get("status") == "CANCELLED" else NO_STAGES.get(n.get("type"), "Other")
+            record = row(n["id"], n.get("heading"), [b.get("name") for b in n.get("buyer") or []], "Norway", stage,
+                         n.get("publicationDate"), "https://doffin.no/notices/" + quote(n["id"]), n, NO,
+                         description=n.get("description"), deadline=n.get("deadline"), amount=value.get("amount"),
+                         currency=value.get("currencyCode"), value_type="Estimated value" if value else "")
+            batch.append(prov.located(record, document, prov.json_location(f"/hits/{i}")))
+        yield batch
+        if not hits or page * 100 >= data.get("numHitsTotal", 0):
+            return
+        page += 1
+
+LV_STAGES = {  # procurement-level statuses
+             "izsludināts":"Tender", "pieteikumi/piedāvājumi atvērti":"Evaluation", "lēmums pieņemts":"Award", "uzsākta līguma slēgšana":"Award",
+             "līgums noslēgts":"Award", "noslēgts":"Award", "pārtraukts":"Cancellation", "izbeigts":"Cancellation",
+             # lot-level statuses
+             "publicēta":"Tender", "piedāvājumi/pieteikumi iesniegti":"Evaluation", "piedāvājumi/pieteikumi atlasīti":"Evaluation",
+             "piedāvājumu/pieteikumu atlase":"Evaluation", "uzvarētāju noteikšana":"Evaluation", "līgums piešķirts":"Award",
+             "līgumi noslēgti":"Award", "izbeigta bez rezultāta":"Cancellation", "pārtraukta":"Cancellation"}
+
+def lv_date(value):
+    value = (value or "").strip()
+    return datetime.strptime(value, "%d.%m.%Y").date().isoformat() if value else ""
+
+def latvia(start, end, cache):
+    meta = js(LV)["result"]
+    for year in range(int(start[:4]), int(end[:4]) + 1):
+        resource_ = next((r for r in meta["resources"] if r["name"].lower().endswith(f"_{year}.csv")), None)
+        if resource_ is None:
+            continue
+        url = resource_["url"]
+        if urlsplit(url).scheme != "https" or urlsplit(url).hostname != "data.gov.lv":
+            raise ValueError("The Latvian catalogue listed an unexpected download address.")
+        path, document = cached(url, cache, ".csv")
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames and "Iepirkuma_ID" not in reader.fieldnames:
+                raise ValueError("The Latvian file has an unexpected layout.")
+            for group in itertools.batched(enumerate(reader, 1), 500):
+                batch = []
+                for number, r in group:
+                    published = lv_date(r.get("Iepirkuma_izsludinasanas_datums"))
+                    if not start <= published <= end:
+                        continue
+                    lot = r.get("Iepirkuma_dalas_nr")
+                    status = flat((lot and r.get("Iepirkuma_dalas_statuss")) or r.get("Iepirkuma_statuss")).lower()
+                    title = flat(r.get("Iepirkuma_nosaukums"))
+                    if lot and r.get("Iepirkuma_dalas_nosaukums"):
+                        title += " — " + flat(r["Iepirkuma_dalas_nosaukums"])
+                    price = (r.get("Dalas_planota_ligumcena") if lot else r.get("Planota_ligumcena")) or ""
+                    cpv = [c.split()[0].split("-")[0] for c in [r.get("CPV_kods_galvenais_prieksmets") or ""] + (r.get("CPV_kodi_papildus_prieksmeti") or "").split(";") if c.strip()]
+                    record = row(r["Iepirkuma_ID"] + ("/" + lot if lot else ""), title, r.get("Pasutitaja_nosaukums"), "Latvia",
+                                 LV_STAGES.get(status, "Other"), published,
+                                 r.get("Hipersaite_EIS_kura_pieejams_zinojums") or SOURCES["lv"][4], r, url,
+                                 description=" · ".join(x for x in (r.get("Proceduras_veids"), r.get("Iepirkuma_prieksmeta_veids"), r.get("Iepirkuma_statuss")) if x),
+                                 deadline=lv_date(r.get("Piedavajumu_iesniegsanas_datums")), cpv=list(dict.fromkeys(cpv)),
+                                 amount=price.replace(",", "."), currency=((r.get("Dalas_ligumcenas_valuta") if lot else r.get("Ligumcenas_valuta")) or "") if price else "",
+                                 value_type="Estimated value" if price else "", process=r.get("Iepirkuma_identifikacijas_numurs"))
+                    batch.append(prov.located(record, document, prov.csv_location(number)))
+                if batch:
+                    yield batch
+
+COLLECTORS = dict(ted=ted,de=germany,fr=france,es=spain,pl=poland,nl=netherlands,ie=ireland,uk=uk,cf=cf,
+                  ro=romania,ch=switzerland,gr=greece,no=norway,lv=latvia)
