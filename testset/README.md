@@ -10,6 +10,8 @@ Use the development entries first. Reserve the holdout entries for a final run o
 
 To reproduce the connection evaluation, install PyYAML and build the probe example with `cargo build --locked --example probe`. Pass the compiled binary path to `scripts/train_ranker.py` to regenerate coefficients from the development split. Pass the same binary path to `scripts/eval_decisions.py` for a per-portal report. The evaluator uses the embedded weights. Set `OPENAI_API_KEY` and `WATCHTOWER_MODEL` for live decisions or pass `--rank-only` to report the ranker alone.
 
+Development portals marked `unsupported-post` have no usable GET listing in the inventory. The trainer treats their probed candidates as negative examples. The evaluation lists them as unsupported POST and scores access blocks separately.
+
 The country files contain reference samples observed on 20 November 2026. Each row identifies a tender and one procurement document downloaded anonymously. Match the tender by source URL or portal identifier, compare the recorded fields, then fetch the document from Watchtower and compare its byte length and SHA-256. On TenderNed the ID identifies a publication and `referenceNumber` identifies the procurement.
 
 Five is the sample size. Watchtower should return every open tender and its documents. Additional tenders and files are expected. A missing field in a reference row is unscored. For later live runs, check the source for expiry, amendments or withdrawal before treating a difference as a regression. For a blocked case, check for a failed state and a reason that names the login, registration or CAPTCHA requirement. Space requests to each portal at least one second apart.

@@ -50,7 +50,9 @@ def report(split, results, use_model):
         rank = probe_outcome(result)
         model = model_outcome(result) if use_model else "-"
         expected = row.get("best_method", "unlabelled")
-        if row["expect"] == "failed":
+        if row.get("readiness") == "unsupported-post":
+            expected = "unsupported POST"
+        elif row["expect"] == "failed":
             expected = "blocked"
             blocked += 1
             blocked_hits += rank == "blocked"
