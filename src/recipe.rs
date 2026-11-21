@@ -600,6 +600,9 @@ pub async fn read(
     let mut tenders = Vec::with_capacity(entries);
     let mut identities = HashSet::new();
     let mut document_count = 0;
+    // Set when the selected source IDs repeat across tenders with different detail pages, which
+    // means the ID selector picked a label rather than an identifier.
+    let mut ids_unreliable = false;
     for mut row in listing_rows {
         if let Some(url) = row.detail {
             let place = location(&url);
@@ -625,15 +628,36 @@ pub async fn read(
             }
         }
         let mut tender = normalize(row.fields, recipe);
+        if ids_unreliable {
+            tender.id = None;
+        }
         let key = tender.key().ok_or_else(|| {
             ReadFailure::Incomplete(
                 "A listing item has neither a source ID nor a detail URL".into(),
             )
         })?;
-        if !identities.insert(key) {
-            return Err(ReadFailure::Incomplete(
-                "Pagination produced duplicate tender identities".into(),
-            ));
+        if !identities.insert(key.clone()) {
+            let distinct_pages = !ids_unreliable
+                && key.starts_with("id:")
+                && tender.url.is_some()
+                && tenders
+                    .iter()
+                    .all(|other: &Tender| other.url.is_some() && other.url != tender.url);
+            if !distinct_pages {
+                return Err(ReadFailure::Incomplete(
+                    "Pagination produced duplicate tender identities".into(),
+                ));
+            }
+            tracing::warn!(
+                "Source IDs repeat across tenders with different detail pages; leaving IDs empty"
+            );
+            ids_unreliable = true;
+            tender.id = None;
+            for other in &mut tenders {
+                other.id = None;
+            }
+            identities = tenders.iter().filter_map(Tender::key).collect();
+            identities.insert(tender.key().expect("the tender has a URL"));
         }
         let referrer = tender.url.as_deref().and_then(|url| Url::parse(url).ok());
         tender.documents = attachment_files(
@@ -2201,6 +2225,7 @@ fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
         publication_date: get("publicationDate").and_then(|value| {
             NaiveDate::parse_from_str(&value, "%Y-%m-%d")
                 .ok()
+                .or_else(|| european_date(&value))
                 .or_else(|| {
                     recipe
                         .date_format
@@ -2239,22 +2264,48 @@ fn normalize(fields: Fields, recipe: &Recipe) -> Tender {
     }
 }
 
+/// A day-first date with dots, as most European portals write it (`04.11.2026`), possibly
+/// followed by a time. Slash dates are left alone because their day and month order varies.
+fn european_date(value: &str) -> Option<NaiveDate> {
+    let date = value.split_whitespace().next()?;
+    NaiveDate::parse_from_str(date.trim_end_matches('.'), "%d.%m.%Y").ok()
+}
+
+/// Local date-time layouts tried when the recipe names no deadline format, or its format does
+/// not match. A deadline needs a time, so date-only values stay missing.
+const DEADLINE_FORMATS: &[&str] = &[
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%dT%H:%M:%S",
+    "%d.%m.%Y %H:%M",
+    "%d.%m.%Y %H:%M:%S",
+    "%d. %m. %Y %H:%M",
+];
+
 fn deadline(value: &str, recipe: &Recipe) -> Option<DateTime<FixedOffset>> {
+    let value = value.trim();
     if let Ok(date) = DateTime::parse_from_rfc3339(value) {
         return Some(date);
     }
-    let format = recipe
+    let formats = recipe
         .deadline_format
         .as_deref()
-        .unwrap_or("%Y-%m-%d %H:%M");
-    if let Ok(date) = DateTime::parse_from_str(value, format) {
-        return Some(date);
+        .into_iter()
+        .chain(DEADLINE_FORMATS.iter().copied());
+    let tz: Option<Tz> = recipe.timezone.as_ref().and_then(|tz| tz.parse().ok());
+    for format in formats {
+        if let Ok(date) = DateTime::parse_from_str(value, format) {
+            return Some(date);
+        }
+        if let (Some(tz), Ok(local)) = (tz, NaiveDateTime::parse_from_str(value, format)) {
+            return tz
+                .from_local_datetime(&local)
+                .single()
+                .map(|date| date.fixed_offset());
+        }
     }
-    let tz: Tz = recipe.timezone.as_ref()?.parse().ok()?;
-    let local = NaiveDateTime::parse_from_str(value, format).ok()?;
-    tz.from_local_datetime(&local)
-        .single()
-        .map(|date| date.fixed_offset())
+    None
 }
 
 #[cfg(test)]
@@ -3238,6 +3289,37 @@ mod listing_route_tests {
             .into_iter()
             .collect();
         assert_eq!(last_linked_page(&offset, &links), None);
+    }
+}
+
+#[cfg(test)]
+mod date_and_id_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn day_first_dotted_dates_parse_without_a_recipe_format() {
+        let recipe: Recipe = serde_json::from_value(json!({
+            "listing": "html", "items": "tr", "timezone": "Europe/Prague"
+        }))
+        .unwrap();
+        assert_eq!(
+            european_date("04.11.2026"),
+            NaiveDate::from_ymd_opt(2026, 11, 4)
+        );
+        assert_eq!(
+            european_date("04.11.2026 10:00"),
+            NaiveDate::from_ymd_opt(2026, 11, 4)
+        );
+        assert_eq!(european_date("11/04/2026"), None);
+        assert_eq!(
+            deadline("23.11.2026 10:00", &recipe).unwrap().to_rfc3339(),
+            "2026-11-23T10:00:00+01:00"
+        );
+        assert_eq!(deadline("23.11.2026", &recipe), None);
+        let no_timezone: Recipe =
+            serde_json::from_value(json!({"listing": "html", "items": "tr"})).unwrap();
+        assert_eq!(deadline("23.11.2026 10:00", &no_timezone), None);
     }
 }
 

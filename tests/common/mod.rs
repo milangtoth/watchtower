@@ -601,7 +601,16 @@ impl PortalModel for Auditor {
         };
         // Production verify shows the model at most four parsed tenders.
         for tender in candidate.tenders.iter().take(4) {
-            let id = tender.id.clone().unwrap_or_default();
+            // A read may leave unreliable source IDs empty; the detail URL /tenders/{id} still
+            // names the row.
+            let id = tender.id.clone().unwrap_or_else(|| {
+                tender
+                    .url
+                    .as_deref()
+                    .and_then(|url| url.rsplit_once("/tenders/"))
+                    .map(|(_, id)| id.to_owned())
+                    .unwrap_or_default()
+            });
             let Some(row) = truth.get(&id) else {
                 return Err(ReadFailure::Incomplete(format!(
                     "Sampled tender {id} is not on the source"

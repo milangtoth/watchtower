@@ -116,3 +116,22 @@ async fn ocds_api_that_stops_answering_json_mid_listing_counts_as_throttling() {
     assert_eq!(h.model.learns.load(Ordering::SeqCst), 0);
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn source_ids_that_repeat_across_detail_pages_are_left_empty() {
+    // The id selector reads the row's class, the same on every row, while the detail URLs
+    // differ: the ID is a label, not an identifier.
+    let mut recipe = html_recipe();
+    recipe["list_fields"]["id"] = json!({"path": "", "attribute": "class"});
+    let h = Harness::attach(Layout::two_pages(), recipe, "/").await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "serving", "{portal}");
+    let tenders = h.tenders().await;
+    let tenders = tenders.as_array().unwrap();
+    assert!(tenders.len() >= 2, "{tenders:?}");
+    assert!(
+        tenders.iter().all(|tender| tender["id"].is_null()),
+        "{tenders:?}"
+    );
+    h.shutdown().await;
+}
