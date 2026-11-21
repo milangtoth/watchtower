@@ -1,4 +1,7 @@
-use crate::domain::{ConnectionCandidate, ConnectionMethod};
+use crate::{
+    domain::{ConnectionCandidate, ConnectionMethod},
+    recipe::date_filters,
+};
 use reqwest::Url;
 
 // Regenerate with scripts/train_ranker.py and the compiled probe example.
@@ -57,8 +60,47 @@ fn score_and_sort(
             0.0
         };
     }
+    // A windowed OCDS entry goes before the same entry without its date filters, which would
+    // page through the API's whole history.
+    for index in 0..candidates.len() {
+        if let Some(unfiltered) = unfiltered_twin_score(&candidates, index) {
+            let windowed = &mut candidates[index].score;
+            *windowed = windowed.max(unfiltered.next_up());
+        }
+    }
     candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
     candidates
+}
+
+/// The highest score of a usable OCDS candidate whose entry URL is candidate `index`'s entry
+/// URL without its date filters, when `index` is a usable OCDS candidate with date filters.
+fn unfiltered_twin_score(candidates: &[ConnectionCandidate], index: usize) -> Option<f32> {
+    let windowed = &candidates[index];
+    if windowed.method != ConnectionMethod::Ocds || !windowed.is_usable() {
+        return None;
+    }
+    let url = Url::parse(&windowed.entry_url).ok()?;
+    let filters = date_filters(&url);
+    if filters.is_empty() {
+        return None;
+    }
+    let shape = |url: &Url| {
+        let mut pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .into_owned()
+            .filter(|(key, _)| !filters.iter().any(|filter| filter.key == *key))
+            .collect();
+        pairs.sort();
+        (url.origin(), url.path().to_owned(), pairs)
+    };
+    let target = shape(&url);
+    candidates
+        .iter()
+        .filter(|other| other.method == ConnectionMethod::Ocds && other.is_usable())
+        .filter_map(|other| Some((other, Url::parse(&other.entry_url).ok()?)))
+        .filter(|(_, other)| date_filters(other).is_empty() && shape(other) == target)
+        .map(|(other, _)| other.score)
+        .max_by(f32::total_cmp)
 }
 
 fn features(candidate: &ConnectionCandidate, portal_host: Option<&str>) -> [f64; 13] {
@@ -133,6 +175,40 @@ mod tests {
         assert_eq!(ranked[1].method, Html);
         assert_eq!(ranked[2].http_status, 403);
         assert!(ranked.windows(2).all(|pair| pair[0].score > pair[1].score));
+    }
+
+    #[test]
+    fn a_windowed_ocds_entry_outranks_its_unfiltered_twin() {
+        let unfiltered = ConnectionCandidate {
+            sample_items: 100,
+            has_pagination: true,
+            ..candidate(Ocds, "api/releases?stages=tender")
+        };
+        let windowed = ConnectionCandidate {
+            sample_items: 3,
+            ..candidate(
+                Ocds,
+                "api/releases?stages=tender&updatedFrom=2026-08-22&updatedTo=2026-11-20",
+            )
+        };
+        let other_path = ConnectionCandidate {
+            sample_items: 100,
+            has_pagination: true,
+            ..candidate(Ocds, "api/records")
+        };
+        let ranked = rank(vec![other_path, unfiltered.clone(), windowed.clone()]);
+        let at = |url: &str| ranked.iter().position(|c| c.entry_url == url).unwrap();
+        assert!(at(&windowed.entry_url) < at(&unfiltered.entry_url));
+        assert!(ranked[at(&windowed.entry_url)].score > ranked[at(&unfiltered.entry_url)].score);
+
+        // Without its twin the windowed entry keeps its own score.
+        let alone = rank(vec![windowed.clone(), candidate(Html, "listing")]);
+        let plain = rank(vec![ConnectionCandidate {
+            entry_url: "https://portal.example/api/other?updatedFrom=2026-08-22".into(),
+            ..windowed
+        }]);
+        let alone = alone.iter().find(|c| c.method == Ocds).unwrap();
+        assert_eq!(alone.score, plain[0].score);
     }
 
     #[test]
