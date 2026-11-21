@@ -288,7 +288,9 @@ The reader refuses a listing of more than 250 pages. When the listing is that lo
 tenders with awarded or historical notices, look for a listing limited to open tenders: a status
 filter, a larger page size the site offers, or a search form filter. Sampled links labelled
 "Search form filter:" are a form's action with one option added; fetch one to confirm the portal
-honours it before using it as start_url.
+honours it before using it as start_url. When the listing offers no such links, fetch the site's
+advanced or extended search page: its form's status options, such as one for tenders still open
+for submission, are then sampled as filter links.
 Reply with action fetch to request one useful HTTP(S) page (same site or a URL evidenced in the samples),
 recipe to propose a recipe, or fail when there is no supported public interface. Use empty strings for
 unused fields. Each sample includes a cleaned source excerpt and up to 40 observed links. Prefer links

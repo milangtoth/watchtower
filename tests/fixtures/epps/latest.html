@@ -1,0 +1,26 @@
+<!doctype html>
+<html><body>
+<nav><ul>
+  <li class="nav-item"><div>
+    <a href="/epps/prepareAdvancedSearch.do?type=cftFTS" class="nav-link p-2"><span class="fa fa-search" aria-label='Advanced search'></span>
+      <span class="d-none d-lg-inline">Advanced search</span></a>
+  </div></li>
+  <li class="nav-item"><a href="/epps/prepareCurrentOpportunities.do?currentType=cft">Latest CfTs</a></li>
+</ul></nav>
+<form name="searchCfTWorkspaceForm" method="post" action="/epps/viewCFTSAction.do">
+  <input type="hidden" name="isFTS" value="true">
+  <input type="hidden" name="status" value="">
+  <input type="hidden" name="captcha" value="">
+</form>
+<table id="T01" class="table table-striped">
+  <thead><tr><th>#</th><th>Title</th><th>Resource ID</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><a href="/epps/cft/prepareViewCfTWS.do?resourceId=9000001">Road resurfacing</a></td><td>9000001</td><td>Tender Submission</td></tr>
+    <tr><td>2</td><td><a href="/epps/cft/prepareViewCfTWS.do?resourceId=9000002">Legal services framework</a></td><td>9000002</td><td>Awarded</td></tr>
+  </tbody>
+</table>
+<ul class="pagination">
+  <li><a class="page-link" href="?d-3680175-p=2&amp;searchType=cftFTS&amp;latest=true">Next</a></li>
+  <li><a class="page-link" href="?d-3680175-p=302&amp;searchType=cftFTS&amp;latest=true">Last</a></li>
+</ul>
+</body></html>
