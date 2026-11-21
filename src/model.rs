@@ -89,9 +89,29 @@ pub fn top_ranked(
     })
 }
 
+/// The model API a deployment talks to. Both return JSON that Rust validates before use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provider {
+    /// OpenAI Responses API with strict JSON Schema structured outputs.
+    OpenAi,
+    /// An OpenAI-compatible Chat Completions API in JSON mode, such as DeepSeek. The schema is
+    /// given in the instructions, and the reply is validated when it is parsed.
+    Chat,
+}
+
+impl Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Chat => "The model API",
+        }
+    }
+}
+
 pub struct OpenAi {
     client: Client,
     config: Option<(String, String)>,
+    provider: Provider,
     responses_url: String,
     store: Store,
     /// Model calls in flight at once across all portals, so a batch of attaches stays within the
@@ -105,22 +125,42 @@ pub const MODEL_CONCURRENCY: usize = 6;
 const MODEL_RETRY_WAITS: [u64; 4] = [2, 5, 15, 30];
 
 impl OpenAi {
+    /// Reads the model settings from the environment. `WATCHTOWER_MODEL_PROVIDER` is `openai`
+    /// (the default, with `OPENAI_API_KEY`) or `deepseek` (with `DEEPSEEK_API_KEY`).
+    /// `WATCHTOWER_MODEL_URL` overrides the endpoint, and `WATCHTOWER_MODEL` names the model.
     pub fn new(store: Store) -> anyhow::Result<Self> {
-        let config = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .zip(
-                std::env::var("WATCHTOWER_MODEL")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty()),
-            );
+        let env = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        let provider_name = env("WATCHTOWER_MODEL_PROVIDER").unwrap_or_else(|| "openai".into());
+        let (provider, key_var, url) = match provider_name.to_ascii_lowercase().as_str() {
+            "openai" => (
+                Provider::OpenAi,
+                "OPENAI_API_KEY",
+                "https://api.openai.com/v1/responses",
+            ),
+            "deepseek" => (
+                Provider::Chat,
+                "DEEPSEEK_API_KEY",
+                "https://api.deepseek.com/chat/completions",
+            ),
+            other => {
+                anyhow::bail!("WATCHTOWER_MODEL_PROVIDER must be openai or deepseek, not {other}")
+            }
+        };
+        let config = env(key_var).zip(env("WATCHTOWER_MODEL"));
+        let responses_url = env("WATCHTOWER_MODEL_URL").unwrap_or_else(|| url.into());
         Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(90))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             config,
-            responses_url: "https://api.openai.com/v1/responses".into(),
+            provider,
+            responses_url,
             store,
             slots: Arc::new(tokio::sync::Semaphore::new(MODEL_CONCURRENCY)),
         })
@@ -142,7 +182,7 @@ impl OpenAi {
     ) -> Result<T, ReadFailure> {
         let (key, model) = self.config.as_ref().ok_or_else(|| {
             ReadFailure::Incomplete(
-                "Set OPENAI_API_KEY and WATCHTOWER_MODEL to enable portal learning".into(),
+                "Set the model API key and WATCHTOWER_MODEL to enable portal learning".into(),
             )
         })?;
         let _slot = self
@@ -150,11 +190,22 @@ impl OpenAi {
             .acquire()
             .await
             .map_err(|_| ReadFailure::Temporary("Model calls are shutting down".into()))?;
-        let body = json!({
-            "model": model, "store": false, "instructions": instructions,
-            "input": input.to_string(), "max_output_tokens": 5000,
-            "text": {"format": {"type": "json_schema", "name": operation.as_str(), "strict": true, "schema": schema}}
-        });
+        let body = match self.provider {
+            Provider::OpenAi => json!({
+                "model": model, "store": false, "instructions": instructions,
+                "input": input.to_string(), "max_output_tokens": 5000,
+                "text": {"format": {"type": "json_schema", "name": operation.as_str(), "strict": true, "schema": schema}}
+            }),
+            Provider::Chat => json!({
+                "model": model, "stream": false, "max_tokens": 8000,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": chat_instructions(instructions, &schema)},
+                    {"role": "user", "content": input.to_string()}
+                ]
+            }),
+        };
+        let api = self.provider.name();
         let mut waits = MODEL_RETRY_WAITS.iter();
         let response = loop {
             let response = self
@@ -180,47 +231,32 @@ impl OpenAi {
                         .and_then(|value| value.trim().parse::<u64>().ok())
                         .unwrap_or(*wait)
                         .min(60);
-                    tracing::warn!(status = status.as_u16(), wait, "OpenAI call retried");
+                    tracing::warn!(status = status.as_u16(), wait, "Model call retried");
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                 }
                 None => {
                     return Err(ReadFailure::Temporary(format!(
-                        "OpenAI returned HTTP {}",
+                        "{api} returned HTTP {}",
                         status.as_u16()
                     )));
                 }
             }
         };
         let payload: Value = response.json().await.map_err(model_io)?;
-        if let Some(usage) = payload.get("usage") {
-            let usage = ModelUsage {
-                input: usage["input_tokens"].as_i64().unwrap_or(0),
-                cached_input: usage["input_tokens_details"]["cached_tokens"]
-                    .as_i64()
-                    .unwrap_or(0),
-                output: usage["output_tokens"].as_i64().unwrap_or(0),
-            };
+        if let Some(usage) = payload
+            .get("usage")
+            .map(|usage| usage_of(self.provider, usage))
+        {
             self.store
                 .record_usage(job, operation, model, usage)
                 .await
-                .map_err(|_| {
-                    ReadFailure::Temporary("Could not record OpenAI token usage".into())
-                })?;
+                .map_err(|_| ReadFailure::Temporary("Could not record model token usage".into()))?;
         }
-        if payload["status"].as_str() != Some("completed") {
-            return Err(ReadFailure::Incomplete(
-                "OpenAI response did not complete within its output budget".into(),
-            ));
-        }
-        let output = payload["output"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item["content"].as_array())
-            .flatten()
-            .filter(|part| part["type"] == "output_text")
-            .filter_map(|part| part["text"].as_str())
-            .collect::<String>();
+        let output = output_of(self.provider, &payload).ok_or_else(|| {
+            ReadFailure::Incomplete(format!(
+                "{api} response did not complete within its output budget"
+            ))
+        })?;
         serde_json::from_str(&output).map_err(|_| {
             ReadFailure::Incomplete("OpenAI did not return the expected structured response".into())
         })
@@ -694,6 +730,60 @@ impl PortalModel for OpenAi {
     }
 }
 
+/// Instructions for a JSON-mode chat API, which does not enforce a schema: the schema is
+/// stated in the instructions, and `response` validates the reply when parsing it.
+fn chat_instructions(instructions: &str, schema: &Value) -> String {
+    format!(
+        "{instructions}\n\nReply with one JSON object only, no prose. It must match this JSON \
+         Schema exactly: every listed property, no others, in the listed order.\n{schema}"
+    )
+}
+
+/// Token counts from a response's `usage` object.
+fn usage_of(provider: Provider, usage: &Value) -> ModelUsage {
+    let count = |value: &Value| value.as_i64().unwrap_or(0);
+    match provider {
+        Provider::OpenAi => ModelUsage {
+            input: count(&usage["input_tokens"]),
+            cached_input: count(&usage["input_tokens_details"]["cached_tokens"]),
+            output: count(&usage["output_tokens"]),
+        },
+        Provider::Chat => ModelUsage {
+            input: count(&usage["prompt_tokens"]),
+            cached_input: usage
+                .get("prompt_cache_hit_tokens")
+                .map(count)
+                .unwrap_or_else(|| count(&usage["prompt_tokens_details"]["cached_tokens"])),
+            output: count(&usage["completion_tokens"]),
+        },
+    }
+}
+
+/// The reply text of a completed response, or `None` when it stopped early.
+fn output_of(provider: Provider, payload: &Value) -> Option<String> {
+    match provider {
+        Provider::OpenAi => (payload["status"].as_str() == Some("completed")).then(|| {
+            payload["output"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["content"].as_array())
+                .flatten()
+                .filter(|part| part["type"] == "output_text")
+                .filter_map(|part| part["text"].as_str())
+                .collect()
+        }),
+        Provider::Chat => {
+            let choice = &payload["choices"][0];
+            (choice["finish_reason"].as_str() == Some("stop"))
+                .then(|| choice["message"]["content"].as_str())
+                .flatten()
+                .map(str::to_owned)
+                .filter(|text| !text.trim().is_empty())
+        }
+    }
+}
+
 fn reason(text: &str) -> String {
     if text.trim().is_empty() {
         "Model could not verify a complete read".into()
@@ -870,6 +960,7 @@ mod discovery_tests {
         let model = OpenAi {
             client: Client::new(),
             config: Some(("test".into(), "test-model".into())),
+            provider: Provider::OpenAi,
             responses_url,
             store: store.clone(),
             slots: Arc::new(tokio::sync::Semaphore::new(MODEL_CONCURRENCY)),
@@ -925,6 +1016,88 @@ mod discovery_tests {
         assert_eq!(
             (calls, usage.input, usage.cached_input, usage.output),
             (3, 111, 9, 33)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_provider_sends_json_mode_and_reads_choices_and_usage() {
+        use crate::domain::ConnectionMethod::{Html, Ocds};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let tally = hits.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(request): Json<Value>| {
+                let call = tally.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(request["response_format"]["type"], "json_object");
+                    assert_eq!(request["model"], "deepseek-chat");
+                    let system = request["messages"][0]["content"].as_str().unwrap();
+                    assert!(system.contains("JSON Schema") && system.contains("choiceIndex"));
+                    let input: Value =
+                        serde_json::from_str(request["messages"][1]["content"].as_str().unwrap())
+                            .unwrap();
+                    assert_eq!(input["candidates"][1]["evidence"]["method"], "ocds");
+                    let reply = json!({"choiceIndex": 1, "rationale": "OCDS covers the fields."});
+                    let finish = if call == 0 { "stop" } else { "length" };
+                    Json(json!({
+                        "choices": [{"finish_reason": finish,
+                            "message": {"role": "assistant", "content": reply.to_string()}}],
+                        "usage": {"prompt_tokens": 40, "completion_tokens": 12,
+                            "prompt_cache_hit_tokens": 10, "prompt_cache_miss_tokens": 30}
+                    }))
+                }
+            }),
+        );
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let responses_url = format!("http://{}/chat/completions", socket.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(socket, app).await });
+        let files = tempfile::tempdir().unwrap();
+        let store = Store::open(&files.path().join("chat.sqlite"))
+            .await
+            .unwrap();
+        let url = Url::parse("https://portal.example/").unwrap();
+        store.register(url.as_str()).await.unwrap();
+        let job = store.claim().await.unwrap().unwrap();
+        let http = Fetcher::new(files.path().into()).unwrap().portal(&url);
+        let ctx = ReasoningContext {
+            job: &job,
+            url: &url,
+            http: &http,
+        };
+        let model = OpenAi {
+            client: Client::new(),
+            config: Some(("test".into(), "deepseek-chat".into())),
+            provider: Provider::Chat,
+            responses_url,
+            store: store.clone(),
+            slots: Arc::new(tokio::sync::Semaphore::new(MODEL_CONCURRENCY)),
+        };
+        let candidate = |method, path| ConnectionCandidate {
+            method,
+            entry_url: url.join(path).unwrap().to_string(),
+            found_via: "start page link".into(),
+            http_status: 200,
+            content_type: None,
+            sample_items: 5,
+            fields_seen: vec!["title".into()],
+            has_pagination: true,
+            score: 0.5,
+        };
+        let ranked = vec![candidate(Html, "list"), candidate(Ocds, "releases")];
+        let result = model.decide(&ctx, ranked.clone()).await.unwrap();
+        assert_eq!(result.chosen.method, Ocds);
+        assert_eq!(result.model, "deepseek-chat");
+        let error = model.decide(&ctx, ranked).await.unwrap_err().to_string();
+        assert!(error.contains("output budget"), "{error}");
+        let (calls, usage) = store
+            .usage_totals(&job, ModelOperation::Decide)
+            .await
+            .unwrap();
+        assert_eq!(
+            (calls, usage.input, usage.cached_input, usage.output),
+            (2, 80, 20, 24)
         );
         server.abort();
     }
