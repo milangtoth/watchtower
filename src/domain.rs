@@ -308,6 +308,10 @@ pub struct CandidateRead {
 pub enum ReadFailure {
     Blocked(String),
     Incomplete(String),
+    /// Learning concluded that the chosen connection method cannot deliver this portal's open
+    /// tenders, for example an empty app shell or a page with only search forms. Learning that
+    /// method again would cost model calls for the same answer, so the worker moves on.
+    Unsupported(String),
     Temporary(String),
     /// A temporary failure where the portal said how long to wait, via `Retry-After`.
     Throttled {
@@ -346,6 +350,7 @@ impl std::fmt::Display for ReadFailure {
         match self {
             Self::Blocked(reason)
             | Self::Incomplete(reason)
+            | Self::Unsupported(reason)
             | Self::Temporary(reason)
             | Self::Throttled { reason, .. } => f.write_str(reason),
         }

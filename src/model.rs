@@ -258,11 +258,15 @@ recipe to propose a recipe, or fail when there is no supported public interface.
 unused fields. Each sample includes a cleaned source excerpt and up to 40 observed links. Prefer links
 that help determine rows, pagination, details, and public documents. Reuse samples already provided.
 When callsRemainingAfterThis is 0, respond with recipe or fail and give a specific reason.
+Ask for more samples whenever they could still lead to a working recipe.
 connection is the method already chosen for this portal: its method, entryUrl (the first sample),
 how it was found, the fields seen and why it was chosen. Build the recipe for that method and set
 start_url to entryUrl when it differs from portalUrl: html uses listing "html", json uses listing
-"json", feed uses listing "feed", sitemap uses listing "sitemap". If samples show the method cannot
-deliver the open tenders, respond with fail and say why.
+"json", feed uses listing "feed", sitemap uses listing "sitemap". If samples show the chosen method
+cannot deliver the open tenders, for example an empty app shell without rows, pagination or detail
+links, or only search forms that need a POST, respond with action fail, set unsupported to true and
+say why in reason. Learning then stops for this method and Watchtower tries another one. Otherwise
+set unsupported to false.
 recipeJson must contain a JSON object, not markdown. Only use fields actually shown.
 An access widget on a listing is not proof that documents are blocked. No logins or CAPTCHA solving.
 Allowed recipe fields:
@@ -323,6 +327,8 @@ struct Step {
     #[serde(rename = "recipeJson")]
     recipe_json: String,
     reason: String,
+    /// The model concluded that the chosen method cannot deliver the open tenders.
+    unsupported: bool,
 }
 
 /// One audited aspect of a read: whether it holds, and what the source shows.
@@ -490,6 +496,17 @@ impl<'a> Discovery<'a> {
 
     fn apply_step(&mut self, step: Step, call: usize) -> Result<Option<Recipe>, ReadFailure> {
         self.next = None;
+        if step.unsupported {
+            let detail = if step.reason.trim().is_empty() {
+                "The model found that the chosen method cannot deliver the open tenders."
+            } else {
+                &step.reason
+            };
+            return Err(ReadFailure::Unsupported(format!(
+                "Learning stopped after {call} model call(s), method unsupported: {}",
+                sample(detail, 500)
+            )));
+        }
         match step.action.as_str() {
             "fetch" => match self.fetch_url(&step.url) {
                 Ok(url) if call < DISCOVERY_CALLS => {
@@ -647,8 +664,9 @@ impl PortalModel for OpenAi {
                 "type": "object", "additionalProperties": false,
                 "properties": {
                     "action": {"type": "string", "enum": ["fetch", "recipe", "fail"]},
-                    "url": {"type": "string"}, "recipeJson": {"type": "string"}, "reason": {"type": "string"}
-                }, "required": ["action", "url", "recipeJson", "reason"]
+                    "url": {"type": "string"}, "recipeJson": {"type": "string"}, "reason": {"type": "string"},
+                    "unsupported": {"type": "boolean"}
+                }, "required": ["action", "url", "recipeJson", "reason", "unsupported"]
             })).await?;
             if let Some(recipe) = discovery.apply_step(step, call)? {
                 return Ok(recipe);
@@ -761,7 +779,44 @@ mod discovery_tests {
             url: url.into(),
             recipe_json: recipe.into(),
             reason: String::new(),
+            unsupported: false,
         }
+    }
+
+    #[test]
+    fn an_unsupported_method_stops_learning_at_once_but_more_samples_continue() {
+        let portal = Url::parse("https://example.org/").unwrap();
+        let mut discovery = Discovery::new(&portal, portal.clone());
+        // A model that asks for another sample keeps its remaining calls.
+        for call in 1..DISCOVERY_CALLS {
+            let path = format!("/page/{call}");
+            assert!(
+                discovery
+                    .apply_step(step("fetch", &path, ""), call)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                discovery.next.is_some(),
+                "call {call} fetches another sample"
+            );
+            discovery.seen.insert(discovery.next.take().unwrap());
+        }
+        // A model that declares the method unsupported ends learning on that call.
+        let mut discovery = Discovery::new(&portal, portal.clone());
+        let unsupported = Step {
+            unsupported: true,
+            reason: "The entry page is an empty app shell with no rows".into(),
+            ..step("fetch", "/next", "")
+        };
+        let error = discovery.apply_step(unsupported, 1).unwrap_err();
+        assert!(matches!(error, ReadFailure::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("after 1 model call"), "{error}");
+        assert!(error.to_string().contains("empty app shell"), "{error}");
+        assert!(discovery.next.is_none(), "no further sample is fetched");
+        // A plain fail without the flag stays an ordinary learning failure.
+        let error = discovery.apply_step(step("fail", "", ""), 2).unwrap_err();
+        assert!(matches!(error, ReadFailure::Incomplete(_)), "{error:?}");
     }
 
     #[tokio::test]
