@@ -2147,6 +2147,7 @@ mod reader_fix_tests {
             &recipe,
             Some(detail.url.clone()),
             &mut samples,
+            &mut Vec::new(),
         )
         .await
         .unwrap();
@@ -2170,9 +2171,10 @@ mod reader_fix_tests {
             fallback: true,
             ..Attachments::default()
         };
-        let documents = attachment_files(&http, empty, &recipe, None, &mut samples)
-            .await
-            .unwrap();
+        let documents =
+            attachment_files(&http, empty, &recipe, None, &mut samples, &mut Vec::new())
+                .await
+                .unwrap();
         assert!(documents.is_empty());
     }
 }

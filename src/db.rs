@@ -285,6 +285,42 @@ impl Store {
         Ok(Some(id))
     }
 
+    /// Ends the attach run `run_id` as failed and starts a read run for the next connection
+    /// method. The portal stays integrating, and `reason` becomes both the portal reason and
+    /// the finished run's reason. `None` when the portal was removed.
+    pub async fn begin_fallback(
+        &self,
+        job: &Job,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<Option<String>> {
+        let mut tx = self.0.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE portals SET reason = ? WHERE id = ? AND generation = ? AND deleted = 0",
+        )
+        .bind(reason)
+        .bind(&job.portal_id)
+        .bind(job.generation)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(None);
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed', reason = ? WHERE id = ?")
+            .bind(&now)
+            .bind(reason)
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        let id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO runs(id, portal_id, generation, kind, started_at) VALUES(?, ?, ?, 'read', ?)")
+            .bind(&id).bind(&job.portal_id).bind(job.generation).bind(now).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(Some(id))
+    }
+
     /// Marks the portal failed and schedules its next read `retry_in` seconds from now. A failed
     /// portal keeps being read, so it recovers without a person once the portal does.
     pub async fn fail(&self, job: &Job, run_id: &str, reason: &str, retry_in: i64) -> Result<()> {

@@ -1,12 +1,12 @@
 //! Connection methods beyond HTML listings: RSS feeds, sitemaps and OCDS packages, and repair
-//! falling back from one method to the next.
+//! and attach falling back from one method to the next.
 
 mod common;
 
 use common::*;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
-use watchtower::domain::ConnectionMethod::{self, Feed, Html, Ocds, Sitemap};
+use watchtower::domain::ConnectionMethod::{self, Feed, Html, Ocds, Sitemap, Ted};
 
 /// Rules a model would learn for the fixture's tender detail pages.
 fn detail_fields() -> Value {
@@ -205,5 +205,136 @@ async fn repair_fails_naming_both_methods_and_keeps_serving_the_last_tenders() {
     );
     assert_eq!(h.tenders().await, before);
     assert_eq!(chosen(&h).await.1, 2);
+    h.shutdown().await;
+}
+
+fn run_history(runs: &[Value]) -> Vec<String> {
+    runs.iter()
+        .map(|run| {
+            format!(
+                "{}={}",
+                run["kind"].as_str().unwrap(),
+                run["result"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+async fn run_reasons(h: &Harness) -> Vec<String> {
+    h.store
+        .run_history(&h.portal)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|run| run.reason.unwrap_or_default())
+        .collect()
+}
+
+/// A sitemap whose pattern matches no tender page, as GOV.UK's did: it reads zero rows.
+fn empty_sitemap_recipe() -> Value {
+    let mut recipe = sitemap_recipe();
+    recipe["url_pattern"] = json!("/no-such-tenders/");
+    recipe
+}
+
+#[tokio::test]
+async fn first_attach_falls_back_when_the_chosen_method_reads_no_tenders() {
+    let h = Harness::attach_methods(
+        Layout::two_pages(),
+        vec![(Sitemap, "/sitemap.xml"), (Feed, "/feed.xml")],
+        vec![(Sitemap, empty_sitemap_recipe()), (Feed, feed_recipe())],
+    )
+    .await;
+    h.observe("attach-fallback").await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "serving", "{portal}");
+    assert_fixture_tenders(&h).await;
+    let (method, attempt, rationale) = chosen(&h).await;
+    assert_eq!((method, attempt), (Feed, 2));
+    assert!(
+        rationale.starts_with("Sitemap failed during attach (Sitemap read found no tenders)"),
+        "{rationale}"
+    );
+    assert_eq!(
+        h.model.learns.load(Ordering::SeqCst),
+        3,
+        "two sitemap attempts and one feed attempt"
+    );
+    assert_eq!(
+        run_history(&h.runs().await),
+        ["read=failed", "read=ok"],
+        "each method is a run of its own"
+    );
+    let reasons = run_reasons(&h).await;
+    assert!(
+        reasons[0].starts_with("Sitemap failed: Sitemap read found no tenders. Trying Feed"),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons[1].starts_with("Attached and verified via Feed after Sitemap failed. 2 tender(s)"),
+        "{reasons:?}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_attach_names_every_method_and_never_tries_ted() {
+    let mut layout = Layout::two_pages();
+    layout.ocds_broken = true;
+    let h = Harness::attach_methods(
+        layout,
+        vec![(Ted, "/ted"), (Sitemap, "/sitemap.xml"), (Ocds, "/ocds")],
+        vec![(Sitemap, empty_sitemap_recipe())],
+    )
+    .await;
+    h.observe("attach-all-methods-failed").await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "failed");
+    let reason = portal["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with(
+            "Attach tried Sitemap and OCDS; none delivered verified tenders. \
+             Sitemap: Sitemap read found no tenders; OCDS: "
+        ),
+        "{reason}"
+    );
+    assert!(!reason.contains("TED"), "{reason}");
+    let decision = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    assert_eq!((decision.chosen.method, decision.attempt), (Ocds, 2));
+    assert!(
+        decision.alternatives.iter().any(|c| c.method == Ted),
+        "TED stays in the recorded evidence"
+    );
+    assert_eq!(run_history(&h.runs().await), ["read=failed", "read=failed"]);
+    let reasons = run_reasons(&h).await;
+    assert!(reasons[0].starts_with("Sitemap failed: "), "{reasons:?}");
+    assert_eq!(reasons[1], reason, "the last run records the final reason");
+    assert_eq!(h.tenders().await, json!([]));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn login_wall_on_attach_fails_at_once_without_falling_back() {
+    let mut layout = Layout::two_pages();
+    layout.login_wall = true;
+    let h = Harness::attach_methods(
+        layout,
+        vec![(Html, "/"), (Feed, "/feed.xml")],
+        vec![(Feed, feed_recipe())],
+    )
+    .await;
+    h.observe("attach-login-wall").await;
+    let portal = h.portal().await;
+    assert_eq!(portal["state"], "failed");
+    let reason = portal["reason"].as_str().unwrap();
+    assert!(reason.contains("login"), "{reason}");
+    assert_eq!(h.model.decisions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        h.model.learns.load(Ordering::SeqCst),
+        0,
+        "no method was tried"
+    );
+    assert_eq!(run_history(&h.runs().await), ["read=failed"]);
     h.shutdown().await;
 }

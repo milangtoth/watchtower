@@ -448,6 +448,8 @@ pub fn without(mut recipe: Value, keys: &[&str]) -> Value {
 pub struct Auditor {
     pub site: Site,
     pub recipe: Value,
+    /// Recipes learned for particular connection methods instead of `recipe`.
+    pub recipes: Vec<(ConnectionMethod, Value)>,
     pub learns: AtomicUsize,
     pub verifies: AtomicUsize,
     pub decisions: AtomicUsize,
@@ -462,10 +464,15 @@ impl PortalModel for Auditor {
         &self,
         _: &ReasoningContext<'_>,
         _: Option<(&Recipe, &str)>,
-        _: &ConnectionDecision,
+        decision: &ConnectionDecision,
     ) -> Result<Recipe, ReadFailure> {
         self.learns.fetch_add(1, Ordering::SeqCst);
-        Ok(serde_json::from_value(self.recipe.clone()).unwrap())
+        let recipe = self
+            .recipes
+            .iter()
+            .find(|(method, _)| *method == decision.chosen.method)
+            .map_or(&self.recipe, |(_, recipe)| recipe);
+        Ok(serde_json::from_value(recipe.clone()).unwrap())
     }
 
     async fn decide(
@@ -609,7 +616,16 @@ impl Harness {
         interval: i64,
         recovery: Recovery,
     ) -> Self {
-        Self::start(layout, recipe, path, interval, recovery, Vec::new()).await
+        Self::start(
+            layout,
+            recipe,
+            path,
+            interval,
+            recovery,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
     }
 
     /// Like `attach`, with the connection methods the model decides on, in order.
@@ -618,7 +634,34 @@ impl Harness {
         recipe: Value,
         connections: Vec<(ConnectionMethod, &'static str)>,
     ) -> Self {
-        Self::start(layout, recipe, "/", 900, Recovery::default(), connections).await
+        Self::start(
+            layout,
+            recipe,
+            "/",
+            900,
+            Recovery::default(),
+            connections,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Like `attach_connected`, with the recipe the model learns for each connection method.
+    pub async fn attach_methods(
+        layout: Layout,
+        connections: Vec<(ConnectionMethod, &'static str)>,
+        recipes: Vec<(ConnectionMethod, Value)>,
+    ) -> Self {
+        Self::start(
+            layout,
+            html_recipe(),
+            "/",
+            900,
+            Recovery::default(),
+            connections,
+            recipes,
+        )
+        .await
     }
 
     async fn start(
@@ -628,6 +671,7 @@ impl Harness {
         interval: i64,
         recovery: Recovery,
         connections: Vec<(ConnectionMethod, &'static str)>,
+        recipes: Vec<(ConnectionMethod, Value)>,
     ) -> Self {
         let site: Site = Arc::new(Mutex::new(layout));
         let (base, server) = serve(site.clone()).await;
@@ -641,6 +685,7 @@ impl Harness {
         let model = Arc::new(Auditor {
             site: site.clone(),
             recipe,
+            recipes,
             learns: AtomicUsize::new(0),
             verifies: AtomicUsize::new(0),
             decisions: AtomicUsize::new(0),

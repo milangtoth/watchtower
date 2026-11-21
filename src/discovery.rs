@@ -44,6 +44,51 @@ mod tests {
     }
 
     #[test]
+    fn ted_is_never_chosen_but_stays_in_the_evidence() {
+        // The probe reports a TED candidate without a sampled response.
+        let ted = ConnectionCandidate {
+            http_status: 0,
+            sample_items: 40,
+            fields_seen: vec!["title".into(), "deadline".into(), "buyer".into()],
+            ..candidate(ConnectionMethod::Ted, 0.0)
+        };
+        let answered_ted = ConnectionCandidate {
+            http_status: 200,
+            ..ted.clone()
+        };
+        assert!(!ted.is_usable() && !answered_ted.is_usable());
+
+        let ranked = super::rank(vec![
+            ted.clone(),
+            candidate(ConnectionMethod::Html, 0.0),
+            answered_ted,
+        ]);
+        assert_eq!(ranked[0].method, ConnectionMethod::Html);
+        assert!(
+            ranked
+                .iter()
+                .filter(|c| c.method == ConnectionMethod::Ted)
+                .all(|c| c.score == 0.0)
+        );
+
+        // Even listed first, TED is skipped for the first usable candidate and kept as evidence.
+        let decision =
+            top_ranked(vec![ted.clone(), candidate(ConnectionMethod::Feed, 0.4)], 1).unwrap();
+        assert_eq!(decision.chosen.method, ConnectionMethod::Feed);
+        assert_eq!(decision.alternatives[0].method, ConnectionMethod::Ted);
+        assert!(
+            !decision
+                .alternatives
+                .iter()
+                .any(ConnectionCandidate::is_usable)
+        );
+        assert!(
+            top_ranked(vec![ted], 1).is_err(),
+            "TED alone cannot be read"
+        );
+    }
+
+    #[test]
     fn decisions_serialize_with_camel_case_keys_and_lowercase_methods() {
         let decision = top_ranked(vec![candidate(ConnectionMethod::Sitemap, 0.7)], 2).unwrap();
         let value = serde_json::to_value(&decision).unwrap();
