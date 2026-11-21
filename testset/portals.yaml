@@ -67,7 +67,7 @@ portals:
     best_method: html
     entry_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?searchType=cftFTS&latest=true
     readiness: five-public-downloads-verified
-    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option.
+    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option. Rechecked 2026-11-21 from a normal connection, so the live run's CAPTCHA failure is not a real block. Listing pages 1-3 each returned 10 notices and a detail page loaded, all without a CAPTCHA. The only "captcha" on the listing is an empty hidden form field (input name="captcha"), which a model check can mistake for a challenge.
     evidence: etenders-ie-baseline.json
     samples: IE.json
 
@@ -119,6 +119,8 @@ portals:
     expect: failed
     readiness: blocked-verified
     expected_blocker: CAPTCHA required by the search form
+    alternative_url: https://etendersni.gov.uk/epps/quickSearchAction.do?searchType=cftFTS&latest=true
+    note: Rechecked 2026-11-21 from a normal connection (no VPN). This URL is a simple-search form with a CAPTCHA image (/epps/genCaptcha) and no results, so the block is real here. Unlike Ireland's identical URL, it does not redirect to a listing. The same ePPS latest-opportunities listing at alternative_url is public, paginated and links detail pages with documents, all without a CAPTCHA. Decide whether this stays a blocked case.
 
   - name: Central Bedfordshire In-tend
     url: https://in-tendhost.co.uk/centralbedfordshire/aspx/Tenders/Current
@@ -141,7 +143,7 @@ portals:
     best_method: ocds
     entry_url: https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=25
     readiness: needs-five-download-baseline
-    note: Two cursor pages returned 25 distinct releases each. All 25 first-page releases carried deadlines and 12 carried document links.
+    note: Two cursor pages returned 25 distinct releases each. All 25 first-page releases carried deadlines and 12 carried document links. On 2026-11-21, from a normal connection, /Search, /Search/Results and the OCDS API all returned HTTP 200 to Watchtower's user agent. The live run's HTTP 403 did not reproduce, so it is treated as a VPN artefact. The footer's "Data and API" link leads to the API documentation.
     evidence: https://www.gov.uk/government/publications/open-contracting
 
   - name: Berlin public procurement
@@ -281,9 +283,9 @@ portals:
     split: development
     expect: serving
     best_method: html
-    entry_url: https://www.uvo.gov.sk/vyhladavanie/vyhladavanie-zakaziek
+    entry_url: https://www.uvo.gov.sk/vyhladavanie/vyhladavanie-zakaziek?datumAktualizacie=7
     readiness: needs-five-download-baseline
-    note: The public results include buyer and publication date and link to unique tender detail pages. A sampled detail has a public documents tab.
+    note: The public results include buyer and publication date and link to unique tender detail pages. A sampled detail has a public documents tab. The unfiltered listing is the whole archive (105,292 records, 5,265 pages of 20 on 2026-11-21), beyond the reader's 250-page limit, so a read can never match its total. The form has no open-tenders filter; datumAktualizacie=7 (updated in the last 7 days) gives 782 records on 40 pages.
 
   - name: BOAMP
     url: https://www.boamp.fr/pages/recherche/?sort=dateparution
@@ -398,7 +400,7 @@ portals:
     evidence: https://www.simap.ch/
 
   - name: KIMDIS
-    url: https://cerpp.eprocurement.gov.gr/kimds2/unprotected/searchNotice.htm
+    url: https://cerpp.eprocurement.gov.gr/upgkimdis/unprotected/home.xhtml
     country: GR
     software: KIMDIS
     kind: multi-step
@@ -406,7 +408,7 @@ portals:
     expect: failed
     readiness: unsupported-post
     expected_blocker: The open-data notice search requires POST, which Watchtower cannot read.
-    note: The search takes a JSON date range at https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0. Notice PDFs are public by reference number.
+    note: The search takes a JSON date range at https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0. Notice PDFs are public by reference number. On 2026-11-21 the old kimds2 search page returned HTTP 503 and the site root redirected to this upgkimdis app. A GET on the search returns HTTP 500.
     evidence: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/swagger-ui/index.html
 
   - name: Doffin
