@@ -599,7 +599,18 @@ pub async fn read(
     let mut document_count = 0;
     for mut row in listing_rows {
         if let Some(url) = row.detail {
-            let page = http.page(url).await?;
+            let place = location(&url);
+            // A detail page behind a login rules out this route, not the portal: the listing
+            // was readable, so a repair can choose public detail data instead.
+            let page = http.page(url).await.map_err(|error| {
+                if error.is_login_wall() {
+                    ReadFailure::Incomplete(format!(
+                        "Detail page {place} requires a login, so this route cannot be read; use a public detail route or the listing's own fields"
+                    ))
+                } else {
+                    error
+                }
+            })?;
             let (fields, attachments) = parse_detail(&page, recipe).map_err(incomplete)?;
             row.fields.extend(fields);
             row.fields
@@ -2315,6 +2326,47 @@ mod reader_fix_tests {
             files,
             ["https://zakazky.example.cz/document_download_101.html"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_login_on_the_listing_blocks_but_on_a_detail_page_fails_only_the_route() {
+        let router = Router::new()
+            .route(
+                "/tenders",
+                get(|| async {
+                    HtmlBody(r#"<table><tr class="row"><td><a href="/t/1">Road survey</a></td></tr></table>"#)
+                        .into_response()
+                }),
+            )
+            .route("/t/1", get(|| async { axum::http::StatusCode::UNAUTHORIZED }))
+            .route("/locked", get(|| async { axum::http::StatusCode::UNAUTHORIZED }));
+        let base = serve(router).await;
+        let recipe: Recipe = serde_json::from_value(serde_json::json!({
+            "listing": "html", "items": "tr.row",
+            "detail_link": {"path": "a", "attribute": "href"},
+            "detail_fields": {"title": {"path": "h1"}}
+        }))
+        .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(files.path().into()).unwrap();
+
+        let listing = Url::parse(&format!("{base}/tenders")).unwrap();
+        let failure = read(&fetcher.portal(&listing), &listing, &recipe)
+            .await
+            .unwrap_err();
+        assert!(matches!(failure, ReadFailure::Incomplete(_)), "{failure:?}");
+        assert!(
+            failure
+                .to_string()
+                .contains("Detail page 127.0.0.1/t/1 requires a login"),
+            "{failure}"
+        );
+
+        let locked = Url::parse(&format!("{base}/locked")).unwrap();
+        let failure = read(&fetcher.portal(&locked), &locked, &recipe)
+            .await
+            .unwrap_err();
+        assert!(failure.is_login_wall(), "{failure:?}");
     }
 
     #[tokio::test]

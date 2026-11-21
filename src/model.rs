@@ -327,6 +327,37 @@ impl<'a> Discovery<'a> {
         });
     }
 
+    /// Fetches the page the model asked for, if any. The entry page must be readable: a login
+    /// or other failure there ends discovery. A page the model picked later that sits behind a
+    /// login or cannot be read only rules out that route; the model hears why and chooses again.
+    async fn take_sample(&mut self, http: &PortalHttp, entry: bool) -> Result<(), ReadFailure> {
+        let Some(url) = self.next.take() else {
+            return Ok(());
+        };
+        match http.page_unless_seen(url.clone(), &self.seen).await {
+            Ok(Some(page)) => self.record_page(url, page),
+            Ok(None) => self.record_repeat(url),
+            Err(error)
+                if !entry
+                    && (error.is_login_wall() || matches!(error, ReadFailure::Incomplete(_))) =>
+            {
+                self.record_unreadable(url, &error);
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    fn record_unreadable(&mut self, requested: Url, error: &ReadFailure) {
+        self.seen.insert(requested);
+        self.feedback = if error.is_login_wall() {
+            "That page requires a login (HTTP 401 or a login page). Choose a public route instead."
+                .into()
+        } else {
+            format!("That page could not be read ({error}). Choose another route.")
+        };
+    }
+
     fn record_repeat(&mut self, requested: Url) {
         self.seen.insert(requested);
         self.feedback =
@@ -511,16 +542,7 @@ impl PortalModel for OpenAi {
             .unwrap_or_else(|| ctx.url.clone());
         let mut discovery = Discovery::new(ctx.url, entry);
         for call in 1..=DISCOVERY_CALLS {
-            if let Some(url) = discovery.next.take() {
-                match ctx
-                    .http
-                    .page_unless_seen(url.clone(), &discovery.seen)
-                    .await?
-                {
-                    Some(page) => discovery.record_page(url, page),
-                    None => discovery.record_repeat(url),
-                }
-            }
+            discovery.take_sample(ctx.http, call == 1).await?;
             let remaining = DISCOVERY_CALLS - call;
             let input = json!({
                 "portalUrl": ctx.url.as_str(), "samples": discovery.pages,
@@ -592,6 +614,59 @@ mod discovery_tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[tokio::test]
+    async fn a_login_wall_rules_out_a_guessed_route_but_blocks_at_the_entry_page() {
+        let router = Router::new()
+            .route(
+                "/",
+                get(|| async { axum::response::Html("<main>Public listing</main>") }),
+            )
+            .route(
+                "/private",
+                get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+            )
+            .route("/account", get(|| async { Redirect::temporary("/login") }))
+            .route(
+                "/login",
+                get(|| async { axum::response::Html("<form><input type=\"password\"></form>") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        let files = tempfile::tempdir().unwrap();
+        let http = Fetcher::new(files.path().into()).unwrap().portal(&base);
+
+        // The model guessed routes behind a login: each is ruled out and discovery goes on.
+        for guessed in ["private", "account", "missing"] {
+            let mut discovery = Discovery::new(&base, base.clone());
+            discovery.next = Some(base.join(guessed).unwrap());
+            discovery.take_sample(&http, false).await.unwrap();
+            assert!(discovery.pages.is_empty());
+            assert!(discovery.seen.contains(&base.join(guessed).unwrap()));
+            let expected = if guessed == "missing" {
+                "404"
+            } else {
+                "requires a login"
+            };
+            assert!(
+                discovery.feedback.contains(expected),
+                "{}",
+                discovery.feedback
+            );
+        }
+
+        // The entry page itself behind a login blocks the portal.
+        let entry = base.join("private").unwrap();
+        let mut discovery = Discovery::new(&entry, entry.clone());
+        let failure = discovery.take_sample(&http, true).await.unwrap_err();
+        assert!(failure.is_login_wall(), "{failure:?}");
+
+        // A readable entry page is sampled as before.
+        let mut discovery = Discovery::new(&base, base.clone());
+        discovery.take_sample(&http, true).await.unwrap();
+        assert_eq!(discovery.pages.len(), 1);
+    }
 
     fn step(action: &str, url: &str, recipe: &str) -> Step {
         Step {
