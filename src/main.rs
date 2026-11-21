@@ -39,6 +39,16 @@ async fn main() -> Result<()> {
         .context("WATCHTOWER_CONCURRENCY must be a positive integer")?
         .unwrap_or(watchtower::worker::CONCURRENCY);
     anyhow::ensure!(concurrency > 0, "WATCHTOWER_CONCURRENCY must be positive");
+    let model_calls = std::env::var("WATCHTOWER_MODEL_CONCURRENCY")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .context("WATCHTOWER_MODEL_CONCURRENCY must be a positive integer")?
+        .unwrap_or(watchtower::model::MODEL_CONCURRENCY);
+    anyhow::ensure!(
+        model_calls > 0,
+        "WATCHTOWER_MODEL_CONCURRENCY must be positive"
+    );
     // Development-only switches. Both are off unless set, and the Dockerfile sets neither.
     let raw_rps = std::env::var("WATCHTOWER_DEV_RPS").ok();
     let rps = watchtower::fetch::dev_rps(raw_rps.as_deref())?;
@@ -69,7 +79,7 @@ async fn main() -> Result<()> {
         jobs: jobs.clone(),
         interval,
         fetcher,
-        model: Arc::new(OpenAi::new(store.clone())?),
+        model: Arc::new(OpenAi::new(store.clone())?.with_concurrency(model_calls)),
         recovery,
         concurrency,
     };
