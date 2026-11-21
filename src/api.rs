@@ -118,6 +118,10 @@ pub fn router(api: Api) -> Router {
         .route("/files/{id}", get(file))
         .merge(crate::dashboard::routes())
         .merge(crate::voice::router())
+        .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "Not found".into()) })
+        .method_not_allowed_fallback(|| async {
+            ApiError(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed".into())
+        })
         .with_state(api)
 }
 
@@ -250,7 +254,7 @@ async fn tenders(
     let since = query
         .changed_since
         .as_deref()
-        .map(DateTime::parse_from_rfc3339)
+        .map(changed_since)
         .transpose()
         .map_err(|_| ApiError::invalid("changedSince must be an RFC 3339 date-time with offset"))?
         .map(|value| value.with_timezone(&Utc));
@@ -260,6 +264,15 @@ async fn tenders(
             .await?
             .ok_or_else(ApiError::missing)?,
     ))
+}
+
+/// Parses `changedSince`. An unencoded `+` offset arrives as a space, since a query string
+/// decodes `+` that way, so a value that fails as sent is retried with its last space as `+`.
+fn changed_since(value: &str) -> Result<DateTime<chrono::FixedOffset>, chrono::ParseError> {
+    DateTime::parse_from_rfc3339(value).or_else(|error| match value.rsplit_once(' ') {
+        Some((time, offset)) => DateTime::parse_from_rfc3339(&format!("{time}+{offset}")),
+        None => Err(error),
+    })
 }
 
 async fn runs(

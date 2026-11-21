@@ -326,25 +326,33 @@ async fn portal_lifecycle_preserves_verified_data_and_serves_document_bytes() {
     );
     assert_eq!(a, b);
     assert_eq!(a.0, StatusCode::ACCEPTED);
-    let queued: Value = serde_json::from_slice(&a.1).unwrap();
-    assert!(
-        !get_json(&app, &run_path)
-            .await
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == queued["runId"])
-    );
+    // The running repair answers the refresh: it is listed at once and queues no second read.
+    let repair: Value = serde_json::from_slice(&a.1).unwrap();
+    let listed = get_json(&app, &run_path).await;
+    let listed = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == repair["runId"])
+        .expect("the returned run is listed while it runs")
+        .clone();
+    assert_eq!(listed["kind"], "repair");
+    assert_eq!(listed["result"], Value::Null);
     model.release.notify_one();
     wait_for(&app, &path, |value| value["state"] == "serving").await;
-    wait_for(&app, &run_path, |history| {
+    let runs = wait_for(&app, &run_path, |history| {
         history
             .as_array()
             .unwrap()
             .iter()
-            .any(|run| run["id"] == queued["runId"] && run["result"] == "ok")
+            .any(|run| run["id"] == repair["runId"] && run["result"] == "ok")
     })
     .await;
+    assert_eq!(
+        runs.as_array().unwrap().len(),
+        4,
+        "no read queued behind the repair"
+    );
     let changed = get_json(&app, &format!("{tender_path}?changedSince={since}")).await;
     assert_eq!(changed.as_array().unwrap().len(), 1);
     assert_eq!(changed[0]["title"], "Park works, updated");

@@ -68,30 +68,41 @@ impl Store {
         Ok(Self(pool))
     }
 
+    /// Registers a portal by its address, or returns the ID it already has. Addresses that differ
+    /// only in ways that cannot change the page, as [`url_key`] folds them, share one ID.
     pub async fn register(&self, url: &str) -> Result<String> {
+        let url = url.trim();
+        let key = url_key(url);
         let mut tx = self.0.begin().await?;
-        let existing: Option<(String, i64, bool)> =
-            sqlx::query_as("SELECT id, generation, deleted FROM portals WHERE url = ?")
-                .bind(url)
-                .fetch_optional(&mut *tx)
-                .await?;
-        let (id, generation) = match existing {
-            Some((id, _, false)) => return Ok(id),
-            Some((id, generation, true)) => {
-                let generation = generation + 1;
-                sqlx::query("UPDATE portals SET deleted = 0, generation = ?, state = 'integrating', reason = 'Waiting for the first read', recipe = NULL, tender_count = 0, last_success_at = NULL, next_read_at = NULL WHERE id = ?")
-                    .bind(generation).bind(&id).execute(&mut *tx).await?;
-                (id, generation)
+        let new_id = Uuid::new_v4().to_string();
+        // A concurrent registration of the same address makes this insert a no-op.
+        let inserted = sqlx::query(
+            "INSERT INTO portals(id, url, url_key) VALUES(?, ?, ?) ON CONFLICT DO NOTHING",
+        )
+        .bind(&new_id)
+        .bind(url)
+        .bind(&key)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        let (id, generation) = if inserted {
+            (new_id, 1)
+        } else {
+            let (id, generation, deleted): (String, i64, bool) = sqlx::query_as(
+                "SELECT id, generation, deleted FROM portals WHERE url_key = ? OR url = ? ORDER BY url_key IS NULL LIMIT 1",
+            )
+            .bind(&key)
+            .bind(url)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !deleted {
+                return Ok(id);
             }
-            None => {
-                let id = Uuid::new_v4().to_string();
-                sqlx::query("INSERT INTO portals(id, url) VALUES(?, ?)")
-                    .bind(&id)
-                    .bind(url)
-                    .execute(&mut *tx)
-                    .await?;
-                (id, 1)
-            }
+            let generation = generation + 1;
+            sqlx::query("UPDATE portals SET deleted = 0, generation = ?, state = 'integrating', reason = 'Waiting for the first read', recipe = NULL, tender_count = 0, last_success_at = NULL, next_read_at = NULL WHERE id = ?")
+                .bind(generation).bind(&id).execute(&mut *tx).await?;
+            (id, generation)
         };
         sqlx::query(INSERT_RUN)
             .bind(Uuid::new_v4().to_string())
@@ -130,10 +141,17 @@ impl Store {
         let Some(generation) = generation else {
             return Ok(None);
         };
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE portal_id = ? AND generation = ? AND kind = 'read' AND finished_at IS NULL")
+        // Work already under way answers the refresh: a running read or repair first, then a
+        // queued read. A repair verifies a fresh read before it publishes, so a second read
+        // queued behind it would only call the portal again.
+        let existing: Option<(String, String)> = sqlx::query_as("SELECT id, kind FROM runs WHERE portal_id = ? AND generation = ? AND finished_at IS NULL ORDER BY started_at IS NULL, rowid LIMIT 1")
             .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
         let run_id = match existing {
-            Some(run_id) => run_id,
+            Some((run_id, kind)) if kind == "repair" => {
+                tx.commit().await?;
+                return Ok(Some(run_id));
+            }
+            Some((run_id, _)) => run_id,
             None => {
                 let run_id = Uuid::new_v4().to_string();
                 sqlx::query(INSERT_RUN)
@@ -749,7 +767,61 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
     }
+    let has_url_key: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('portals') WHERE name = 'url_key')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_url_key {
+        sqlx::query("ALTER TABLE portals ADD COLUMN url_key TEXT")
+            .execute(pool)
+            .await?;
+    }
+    // Earlier versions matched addresses exactly. Give each portal its key; when two existing
+    // portals share one, the older keeps it and the other stays reachable by its exact address.
+    let mut tx = pool.begin().await?;
+    let mut taken: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT url_key FROM portals WHERE url_key IS NOT NULL")
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+    let unkeyed: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, url FROM portals WHERE url_key IS NULL ORDER BY rowid")
+            .fetch_all(&mut *tx)
+            .await?;
+    for (id, url) in unkeyed {
+        let key = url_key(&url);
+        if taken.insert(key.clone()) {
+            sqlx::query("UPDATE portals SET url_key = ? WHERE id = ?")
+                .bind(key)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS portal_url_key ON portals(url_key)")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
+}
+
+/// The form of a portal address used to tell whether two registrations name the same portal.
+/// It folds what cannot change the page that loads: surrounding whitespace, the case of the
+/// scheme and host, a default port, an empty path, a fragment and an empty query. A trailing
+/// slash on a longer path and the query parameters stay, since a server may answer them
+/// differently.
+fn url_key(url: &str) -> String {
+    let url = url.trim();
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.to_owned();
+    };
+    parsed.set_fragment(None);
+    if parsed.query() == Some("") {
+        parsed.set_query(None);
+    }
+    parsed.into()
 }
 
 #[cfg(test)]
@@ -781,6 +853,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reason, None, "existing runs keep a null reason");
+        drop(store);
+        Store::open(&path).await.expect("opening again is a no-op");
+    }
+
+    #[tokio::test]
+    async fn addresses_that_name_the_same_page_share_one_id() {
+        let data = tempfile::TempDir::new().unwrap();
+        let store = Store::open(&data.path().join("keys.sqlite")).await.unwrap();
+        let id = store
+            .register("https://Example.com:443/tenders")
+            .await
+            .unwrap();
+        for same in [
+            " https://example.com/tenders ",
+            "HTTPS://EXAMPLE.COM/tenders#open",
+            "https://example.com/tenders?",
+        ] {
+            assert_eq!(store.register(same).await.unwrap(), id, "{same:?}");
+        }
+        for other in [
+            "https://example.com/tenders/",
+            "https://example.com/tenders?page=2",
+            "http://example.com/tenders",
+        ] {
+            assert_ne!(store.register(other).await.unwrap(), id, "{other:?}");
+        }
+        let root = store.register("https://example.org").await.unwrap();
+        assert_eq!(store.register("https://example.org/").await.unwrap(), root);
+
+        let (a, b) = tokio::join!(
+            store.register("https://example.net/x"),
+            store.register("https://example.net/x#y")
+        );
+        assert_eq!(a.unwrap(), b.unwrap());
+    }
+
+    #[tokio::test]
+    async fn opening_a_database_from_before_url_keys_backfills_them() {
+        let data = tempfile::TempDir::new().unwrap();
+        let path = data.path().join("old.sqlite");
+        {
+            let pool = SqlitePoolOptions::new()
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&path)
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            sqlx::raw_sql("CREATE TABLE portals (id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, generation INTEGER NOT NULL DEFAULT 1, deleted INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'integrating', reason TEXT NOT NULL DEFAULT 'Waiting for the first read', tender_count INTEGER NOT NULL DEFAULT 0, last_success_at TEXT, recipe TEXT, next_read_at INTEGER); INSERT INTO portals(id, url) VALUES('first', 'https://example.com/x'), ('second', 'https://example.com/x#old');")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+        }
+        let store = Store::open(&path).await.unwrap();
+        let keys: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, url_key FROM portals ORDER BY rowid")
+                .fetch_all(&store.0)
+                .await
+                .unwrap();
+        assert_eq!(
+            keys,
+            [
+                ("first".into(), Some("https://example.com/x".into())),
+                ("second".into(), None),
+            ],
+            "the older portal keeps the shared key"
+        );
+        assert!(store.portal("second").await.unwrap().is_some());
+        assert_eq!(
+            store.register("https://example.com/x?").await.unwrap(),
+            "first"
+        );
+        assert_eq!(
+            store.register("https://example.com/x#old").await.unwrap(),
+            "first"
+        );
         drop(store);
         Store::open(&path).await.expect("opening again is a no-op");
     }
