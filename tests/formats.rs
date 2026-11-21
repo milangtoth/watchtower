@@ -239,6 +239,77 @@ fn empty_sitemap_recipe() -> Value {
 }
 
 #[tokio::test]
+async fn first_attach_verifies_a_listing_with_an_explicit_zero_total() {
+    let layout = Layout {
+        pages: vec![Vec::new()],
+        total: Some("0".into()),
+        ..Layout::one_page()
+    };
+    let h = Harness::attach_connected(layout, html_recipe(), vec![(Html, "/")]).await;
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!(h.tenders().await, json!([]));
+    assert_eq!(h.model.verifies.load(Ordering::SeqCst), 1);
+    assert_eq!(run_history(&h.runs().await), ["read=ok"]);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn first_attach_tries_another_url_for_the_same_method() {
+    let h = Harness::attach_connected(
+        Layout::two_pages(),
+        feed_recipe(),
+        vec![
+            (Feed, "/sitemap.xml"),
+            (Feed, "/sitemap.xml"),
+            (Feed, "/feed.xml"),
+        ],
+    )
+    .await;
+    assert_eq!(h.portal().await["state"], "serving");
+    let decision = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    assert_eq!((decision.chosen.method, decision.attempt), (Feed, 2));
+    assert!(decision.chosen.entry_url.ends_with("/feed.xml"));
+    assert_eq!(run_history(&h.runs().await), ["read=failed", "read=ok"]);
+    assert_fixture_tenders(&h).await;
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn repair_replaces_a_saved_ted_choice_before_learning() {
+    let h = Harness::attach_connected(
+        Layout::two_pages(),
+        html_recipe(),
+        vec![(Html, "/"), (Ocds, "/ocds")],
+    )
+    .await;
+    let mut saved = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    let job = watchtower::db::Job {
+        id: h.runs().await[0]["id"].as_str().unwrap().into(),
+        portal_id: h.portal.clone(),
+        generation: 1,
+        url: saved.chosen.entry_url.clone(),
+        recipe: None,
+        last_success_at: None,
+    };
+    saved.chosen.method = Ted;
+    saved.chosen.http_status = 0;
+    h.store.record_decision(&job, &saved).await.unwrap();
+    let learns = h.model.learns.load(Ordering::SeqCst);
+    h.change(|layout| layout.total = Some("5".into())).await;
+    let decision = h.store.latest_decision(&h.portal).await.unwrap().unwrap();
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!((decision.chosen.method, decision.attempt), (Ocds, 2));
+    assert_eq!(h.model.learns.load(Ordering::SeqCst), learns);
+    assert!(
+        decision
+            .alternatives
+            .iter()
+            .any(|c| c.method == Ted && c.score == 0.0)
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn first_attach_falls_back_when_the_chosen_method_reads_no_tenders() {
     let h = Harness::attach_methods(
         Layout::two_pages(),
