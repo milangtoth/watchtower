@@ -156,6 +156,11 @@ pub struct Evidence {
     /// Every same-origin link on the HTML listing pages, compared with the last verified read.
     #[serde(skip)]
     pub listing_links: HashSet<String>,
+    /// The read asked only for releases from a recent start date on, so it leaves out open
+    /// tenders not updated since. Publication then closes tenders only by deadline or by a
+    /// status the source reports, not because they are missing from the read.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub windowed: bool,
 }
 
 /// How Watchtower reads a portal. Probing finds candidates, ranking orders them, and the model

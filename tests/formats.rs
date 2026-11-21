@@ -136,6 +136,59 @@ async fn ocds_preset_maps_fields_follows_next_links_and_needs_no_learning() {
     h.shutdown().await;
 }
 
+fn days_ago(days: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339()
+}
+
+#[tokio::test]
+async fn windowed_ocds_read_keeps_open_tenders_older_than_its_window() {
+    let mut layout = Layout::two_pages();
+    layout.ocds_dates = [("A", days_ago(10)), ("B", days_ago(10))].into();
+    let h = Harness::attach_connected(
+        layout,
+        html_recipe(),
+        vec![(
+            Ocds,
+            "/ocds/since?updatedFrom=2026-01-01T00:00:00&stages=tender",
+        )],
+    )
+    .await;
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!(ids(&h.tenders().await), ["A", "B"]);
+    let beta_before = h.tender("B").await;
+
+    // B was published 120 days ago and not updated since, so the window no longer returns it.
+    // Its deadline is still ahead. A reports a cancellation within the window.
+    h.change(|layout| {
+        layout.ocds_dates.insert("B", days_ago(120));
+        layout.ocds_statuses.insert("A", "cancelled");
+    })
+    .await;
+    h.observe("ocds-window-aged-out").await;
+    assert_eq!(h.portal().await["state"], "serving");
+    let beta = h.tender("B").await;
+    assert_eq!(
+        beta["status"], "open",
+        "absence from a window is no closure"
+    );
+    assert_eq!(beta, beta_before);
+    assert_eq!(h.tender("A").await["status"], "withdrawn");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn ocds_read_without_a_window_closes_tenders_it_no_longer_lists() {
+    let h =
+        Harness::attach_connected(Layout::two_pages(), html_recipe(), vec![(Ocds, "/ocds")]).await;
+    h.change(|layout| layout.pages = vec![vec![alpha()], Vec::new()])
+        .await;
+    h.observe("ocds-removal").await;
+    assert_eq!(h.portal().await["state"], "serving");
+    assert_eq!(h.tender("B").await["status"], "closed");
+    assert_eq!(h.tender("A").await["status"], "open");
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn repair_falls_back_to_the_next_method_after_both_attempts_fail() {
     let h = Harness::attach_connected(
