@@ -7,3 +7,15 @@ mock_portal
 testset
 *.pdf
 __pycache__
+
+target
+node_modules
+storybook-static
+.storybook
+stories
+
+/src/dashboard/node_modules/
+/src/dashboard/elevenlabs-sdk.js
+
+Tender Atlas - source
+tender-atlas-*.jsonl

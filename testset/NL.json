@@ -1,0 +1,82 @@
+[
+  {
+    "id": "450411",
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/450411",
+    "title": "Rijksbrede Europese Aanbesteding Inkoop(advies)diensten en Contract- en leveranciersmanagement 2027 - 2031",
+    "referenceNumber": "604666",
+    "buyerName": "Ministerie van Infrastructuur en Waterstaat",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-18T11:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450411/documenten/14664593/content",
+      "fileName": "Beschrijvend Document ICL 2027-2031 V1.0.pdf",
+      "sizeBytes": 710857,
+      "sha256": "12248a2e98f900920d21ea4f4c6100b0728098ef57ba18480504a1148feb1516"
+    }
+  },
+  {
+    "id": "450406",
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/450406",
+    "title": "EA Bedrijfsfietsen en handhavingsfietsen Gemeente Zwolle",
+    "referenceNumber": "616708",
+    "buyerName": "Gemeente Zwolle",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-02T12:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450406/documenten/15326789/content",
+      "fileName": "Beschrijvend document EA Bedrijfsfietsen en handhavingsfietsen aangepast na NvI.pdf",
+      "sizeBytes": 443049,
+      "sha256": "6a55c4ae34fb13b043fb4e2efe929ae0342646730f65bb7f82555d8050e5eb5d"
+    }
+  },
+  {
+    "id": "450401",
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/450401",
+    "title": "Raamovereenkomst onderhoud Openbare verlichting Edam-Volendam",
+    "referenceNumber": "618923",
+    "buyerName": "Gemeente Edam-Volendam",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-17T10:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450401/documenten/15101360/content",
+      "fileName": "26.412-OW - Raamovereenkomst openbare verlichting Ed-Vo.pdf",
+      "sizeBytes": 639381,
+      "sha256": "642d9e596e037828c3acb9a790fd762b13ccef59010e2c36a016e0f7b97e4354"
+    }
+  },
+  {
+    "id": "450369",
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/450369",
+    "title": "31219804 – Oliegeleidende schermen",
+    "referenceNumber": "619193",
+    "buyerName": "Rijkswaterstaat Programma's, Projecten en Onderhoud",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2026-12-04T15:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450369/documenten/15076008/content",
+      "fileName": "31219804 Aanbestedingsleidraad v2.pdf",
+      "sizeBytes": 764107,
+      "sha256": "ac245ecda1b3ddefde93a2816b545f5610df66c3eb8f21a27fb431a0cae8d4a7"
+    }
+  },
+  {
+    "id": "450355",
+    "url": "https://www.tenderned.nl/aankondigingen/overzicht/450355",
+    "title": "Groot onderhoud Kunstwerken Civiel",
+    "referenceNumber": "620020",
+    "buyerName": "Provincie Overijssel",
+    "publicationDate": "2026-11-20",
+    "submissionDeadline": "2027-01-22T09:00:00+01:00",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450355/documenten/15170755/content",
+      "fileName": "Inschrijvingsleidraad GO Kunstwerken Civiel.pdf",
+      "sizeBytes": 565292,
+      "sha256": "ad70beb594ffba3b46a6cb612d014fb8ad204998a6fa1cfd8c8aec9ec9b5a59e"
+    }
+  }
+]

@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watchtower</title>
+<meta name="description" content="Watchtower operator dashboard: which procurement portals deliver tenders, which broke, and what the system did about it.">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" id="theme-color" content="#0a0a1a">
+<meta name="application-name" content="Watchtower">
+<meta name="apple-mobile-web-app-title" content="Watchtower">
+<meta name="mobile-web-app-capable" content="yes">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Watchtower">
+<meta property="og:title" content="Watchtower">
+<meta property="og:description" content="Which procurement portals deliver tenders, which broke, and what Watchtower did about it.">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32x32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="/favicon-16x16.png" sizes="16x16" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<script>
+  // Pick the theme before the stylesheet paints: saved choice, else the system setting.
+  // Also colours the browser chrome (address bar, PWA title bar) to match.
+  (() => {
+    let theme = null;
+    try { theme = localStorage.getItem('watchtower-theme'); } catch {}
+    if (theme !== 'light' && theme !== 'dark') {
+      theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.dataset.theme = theme;
+    document.getElementById('theme-color').content = theme === 'dark' ? '#0a0a1a' : '#fafafa';
+  })();
+</script>
+
+<link rel="preload" href="/design/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/dashboard.css?v=3">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to dashboard</a>
+<header class="masthead">
+  <nav class="topbar glass-pill" aria-label="Main navigation">
+    <a class="brand" href="#overview" aria-label="Patterno, dashboard overview"><svg class="logo" viewBox="0 0 800 800" aria-hidden="true" fill="currentColor">
+      <path d="M430.722 380.158C276.637 380.158 142.935 292.957 76.1625 165.282C31.9187 226.23 4.37923 300.09 0.496614 380.158C0.158014 386.749 0 393.341 0 400C0 406.659 0.158014 413.251 0.496614 419.842C4.37923 499.91 31.9187 573.77 76.1851 634.718C142.957 507.065 276.659 419.842 430.745 419.842H799.436C799.819 413.296 800 406.659 800 400C800 393.341 799.842 386.704 799.436 380.158H430.722Z"/>
+      <path d="M602.957 472.619C599.887 472.619 596.84 472.731 593.792 472.799C417.02 476.772 268.555 595.305 219.91 757.178C274.041 784.56 335.214 799.955 399.977 799.955C579.278 799.955 731.016 681.941 781.738 519.3H781.851C782.235 518.081 782.573 516.84 782.935 515.621C782.957 515.531 782.98 515.463 783.025 515.372C787.201 501.422 790.61 487.133 793.273 472.596H602.935L602.957 472.619Z"/>
+      <path d="M565.508 325.553C577.833 326.704 590.316 327.336 602.957 327.336H793.296C790.632 312.799 787.224 298.51 783.025 284.56C782.957 284.357 782.889 284.176 782.844 283.973C782.777 283.747 782.732 283.544 782.664 283.318H782.641C732.754 119.3 580.271 0 400 0C335.237 0 274.063 15.395 219.932 42.7765C265.959 195.937 401.354 310.316 565.531 325.553H565.508Z"/>
+    </svg><span>Patterno</span></a>
+    <div class="nav-links">
+      <a href="#overview">Overview</a>
+      <a href="#directory">Portals</a>
+    </div>
+    <div class="nav-actions">
+      <button type="button" class="theme-toggle" id="theme" data-theme-switch aria-label="Switch theme"><svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+      </svg></button>
+      <a class="nav-api" href="/portals">Portal API <span aria-hidden="true">↗</span></a>
+      <button type="button" id="reload" class="nav-cta" aria-label="Reload dashboard">Reload<span class="wide-only"> dashboard</span></button>
+      <button type="button" class="menu-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="mobile-menu"><span></span><span></span></button>
+    </div>
+  </nav>
+  <nav class="mobile-menu" id="mobile-menu" aria-label="Mobile navigation" hidden>
+    <a href="#overview">Overview</a><a href="#directory">Portals</a><a href="/portals">Portal API <span aria-hidden="true">↗</span></a>
+    <button type="button" data-theme-switch>Switch theme</button>
+  </nav>
+</header>
+<main id="main">
+  <section class="overview" id="overview" aria-labelledby="overview-title">
+    <div class="layout overview-layout">
+      <div class="overview-copy">
+        <span class="product-label">Watchtower</span>
+        <h1 id="overview-title">Portal <span>overview.</span></h1>
+        <p class="overview-status" id="status" role="status">Loading portals…</p>
+        <div class="overview-actions">
+          <a class="button button-primary" id="view-portals" href="#directory">View portals <span aria-hidden="true">↓</span></a>
+          <a class="button button-secondary" id="view-issues" href="#directory" hidden>View issues</a>
+        </div>
+        <section class="assistant-entry" aria-labelledby="assistant-entry-title">
+          <div class="voice-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          <div>
+            <h3 id="assistant-entry-title">Tender assistant</h3>
+            <p>Find and compare tenders by voice.</p>
+          </div>
+          <button type="button" id="open-assistant" class="workspace-cta" aria-haspopup="dialog">Open assistant <span aria-hidden="true">→</span></button>
+        </section>
+      </div>
+      <aside class="overview-totals" aria-label="Portal delivery totals">
+        <div class="overview-stat"><span class="metric-number"><i class="state-dot" aria-hidden="true"></i><span id="serving-metric">—</span></span><span class="metric-label">Portals serving</span></div>
+        <div class="overview-stat"><strong class="metric-number" id="tender-metric">—</strong><span class="metric-label">Tenders held</span></div>
+      </aside>
+    </div>
+  </section>
+  <section class="layout directory" id="directory" aria-labelledby="directory-title">
+    <div class="section-heading">
+      <h2 id="directory-title">Portal directory</h2>
+      <label class="state-filter"><span class="sr-only">Filter portals by state</span>
+        <select id="state-filter">
+          <option value="all">All states</option><option value="issues">Needs attention</option>
+          <option value="serving">Serving</option><option value="healing">Healing</option>
+          <option value="failed">Failed</option><option value="integrating">Integrating</option>
+        </select>
+      </label>
+    </div>
+    <p id="directory-message" role="status" hidden></p>
+    <noscript><p>Enable JavaScript to load the dashboard or <a href="/portals">open the portal API</a>.</p></noscript>
+    <div class="portal-grid" id="portals"></div>
+  </section>
+</main>
+<dialog class="assistant-dialog" id="assistant-dialog" aria-labelledby="assistant-title">
+  <header class="assistant-header">
+    <h2 id="assistant-title">Tender assistant</h2>
+    <button type="button" class="assistant-close" id="close-assistant" aria-label="Close assistant" autofocus>×</button>
+  </header>
+  <div class="assistant-body">
+    <section class="voice-panel" aria-labelledby="voice-heading" data-state="idle">
+      <div class="voice-heading">
+        <h3 id="voice-heading">Live voice</h3>
+        <span class="voice-state" id="voice-state" role="status">Ready</span>
+      </div>
+      <div class="voice-stage">
+        <div class="voice-mark voice-mark-large" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <p class="voice-hint" id="voice-hint">Try “Find open IT support tenders in the Netherlands.”</p>
+      </div>
+      <button class="workspace-cta" id="start-call" type="button">Start conversation</button>
+      <div class="in-call-actions" id="call-actions" hidden>
+        <button class="assistant-secondary" id="mute-call" type="button" aria-pressed="false">Mute mic</button>
+        <button class="workspace-cta" id="end-call" type="button">End call</button>
+      </div>
+      <p class="voice-error" id="voice-error" role="alert" hidden></p>
+      <div class="assistant-transcript">
+        <h4 id="transcript-heading">Transcript</h4>
+        <p id="transcript-empty">Spoken messages will appear here.</p>
+        <ol class="transcript-list" id="transcript" role="log" aria-labelledby="transcript-heading"></ol>
+      </div>
+    </section>
+
+    <section class="tenders-panel" aria-labelledby="tenders-heading">
+      <h3 id="tenders-heading">Tender search</h3>
+      <form class="search-form" id="tender-search">
+        <label class="keyword-field">Keyword
+          <input name="query" maxlength="120" placeholder="e.g. IT support" type="search">
+        </label>
+        <label>Country code
+          <input name="country" maxlength="2" pattern="[A-Za-z]{2}" placeholder="e.g. NL" autocomplete="off">
+        </label>
+        <button class="workspace-cta" type="submit">Search</button>
+      </form>
+      <div class="results-heading">
+        <h4>Results</h4>
+        <span id="result-coverage"></span>
+      </div>
+      <div class="results-empty" id="results-empty">
+        <p id="results-message">Results from voice or keyword search will appear here.</p>
+      </div>
+      <p class="search-status" id="search-status" role="status"></p>
+      <ul class="tender-list" id="tender-results"></ul>
+    </section>
+  </div>
+</dialog>
+<script type="module" src="/dashboard/assistant.js"></script>
+<script>
+  const byId = id => document.getElementById(id);
+  const grid = byId('portals');
+  const filter = byId('state-filter');
+  const message = byId('directory-message');
+  const date = stamp => stamp ? new Date(stamp).toLocaleString() : 'Never';
+  const amount = value => value.toLocaleString();
+  let snapshot = null;
+  let loading = false;
+
+  const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text != null) element.textContent = text;
+    return element;
+  };
+  const link = (text, href, className) => {
+    const anchor = node('a', className, text);
+    anchor.href = href;
+    return anchor;
+  };
+  async function get(path) {
+    const response = await fetch(path, { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  }
+  const counts = (held, tenders) => amount(held) + (held === 1 ? ' tender held' : ' tenders held')
+    + (tenders ? ' · ' + amount(tenders.filter(tender => tender.status === 'open').length) + ' open' : '');
+
+  function portalDetails(base, readTenders) {
+    const details = node('details', 'portal-details');
+    const summary = node('summary', null, 'Runs and tenders');
+    const content = node('div', 'detail-content');
+    details.append(summary, content);
+    let loaded = false;
+    details.addEventListener('toggle', async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      content.textContent = 'Loading details…';
+      try {
+        const [runs, tenders] = await Promise.all([get(base + '/runs'), readTenders()]);
+        const history = node('ul', 'record-list');
+        for (const run of runs.slice(-8).reverse()) {
+          const item = node('li');
+          item.append(node('span', 'record-name', run.kind + ' · ' + (run.result ?? 'running')),
+            node('span', 'record-time', date(run.startedAt)));
+          history.append(item);
+        }
+        const records = node('ul', 'record-list');
+        for (const tender of tenders) {
+          const item = node('li');
+          item.append(node('span', 'record-name', tender.title ?? tender.id ?? 'Tender'),
+            node('span', 'record-status', tender.status));
+          for (const doc of tender.documents) {
+            if (/^\/files\/[a-f0-9]{64}$/.test(doc.path)) item.append(link(doc.fileName, doc.path, 'file-link'));
+          }
+          records.append(item);
+        }
+        content.replaceChildren(node('h4', null, 'Recent runs'),
+          runs.length ? history : node('p', null, 'Waiting for first read'),
+          node('h4', null, 'Tenders'), tenders.length ? records : node('p', null, 'No tenders published'),
+          link('Tender API response ↗', base + '/tenders', 'detail-api'));
+      } catch (error) {
+        loaded = false;
+        content.textContent = 'Could not load details (' + error.message + '). Reopen to retry.';
+      }
+    });
+    return details;
+  }
+
+  const METHODS = { html: 'HTML', json: 'JSON', ocds: 'OCDS', feed: 'Feed', sitemap: 'Sitemap', ted: 'TED' };
+  const methodBadge = method => {
+    const badge = node('span', 'method-badge', METHODS[method] ?? String(method).toUpperCase());
+    badge.dataset.method = method;
+    return badge;
+  };
+  const score = value => typeof value === 'number' ? value.toFixed(2) : '—';
+
+  // One probed connection method: where it starts, how it was found and what the probe saw.
+  function candidateItem(candidate, rank) {
+    const item = node('li', 'candidate');
+    const head = node('div', 'candidate-head');
+    head.append(node('span', 'candidate-rank', rank + '.'), methodBadge(candidate.method),
+      node('span', 'candidate-score', 'Score ' + score(candidate.score)));
+    const entry = link(candidate.entryUrl, candidate.entryUrl, 'candidate-url');
+    entry.rel = 'noopener noreferrer';
+    const items = candidate.sampleItems === 1 ? '1 sample item' : amount(candidate.sampleItems ?? 0) + ' sample items';
+    const evidence = node('p', 'candidate-evidence', ['HTTP ' + candidate.httpStatus, items,
+      candidate.hasPagination ? 'paginated' : null, 'via ' + candidate.foundVia].filter(Boolean).join(' · '));
+    const fields = node('p', 'candidate-fields',
+      candidate.fieldsSeen?.length ? 'Fields seen: ' + candidate.fieldsSeen.join(', ') : 'No tender fields seen');
+    item.append(head, /^https?:\/\//i.test(candidate.entryUrl) ? entry : node('span', 'candidate-url', candidate.entryUrl),
+      evidence, fields);
+    return item;
+  }
+
+  // How Watchtower connects to the portal: the chosen method, why, and the ranked fallbacks.
+  function connectionDetails(base) {
+    const details = node('details', 'portal-details connection-details');
+    const summary = node('summary');
+    const label = node('span', 'connection-summary', 'Connection');
+    summary.append(label);
+    const content = node('div', 'detail-content');
+    details.append(summary, content);
+    get(base + '/connection').then(decision => {
+      if (!decision) {
+        label.append(node('span', 'connection-pending', 'Not decided yet'));
+        content.replaceChildren(node('p', null, 'Watchtower has not chosen a connection method for this portal yet.'));
+        return;
+      }
+      label.append(methodBadge(decision.chosen.method));
+      if (decision.attempt > 1) label.append(node('span', 'connection-attempt', 'Attempt ' + decision.attempt));
+      const chosen = node('ol', 'record-list candidate-list');
+      chosen.append(candidateItem(decision.chosen, 1));
+      const rationale = node('blockquote', 'connection-rationale', decision.rationale);
+      const history = decision.attempt > 1
+        ? 'Attempt ' + decision.attempt + ': the method changed after repairs on '
+          + (decision.attempt === 2 ? 'the previous method' : (decision.attempt - 1) + ' earlier methods') + ' failed.'
+        : 'Attempt 1: chosen when the portal was attached.';
+      const meta = node('p', 'connection-meta', 'Decided by ' + decision.model + ' · ' + date(decision.decidedAt));
+      const parts = [node('h4', null, 'Chosen method'), chosen, node('h4', null, 'Why'), rationale, meta,
+        node('h4', null, 'Decision history'), node('p', null, history), node('h4', null, 'Ranked alternatives')];
+      if (decision.alternatives.length) {
+        const alternatives = node('ol', 'record-list candidate-list');
+        decision.alternatives.forEach((candidate, index) => alternatives.append(candidateItem(candidate, index + 2)));
+        parts.push(alternatives);
+      } else {
+        parts.push(node('p', null, 'No other method was found.'));
+      }
+      parts.push(link('Connection API response ↗', base + '/connection', 'detail-api'));
+      content.replaceChildren(...parts);
+    }).catch(error => {
+      label.append(node('span', 'connection-pending', 'Unavailable'));
+      content.replaceChildren(node('p', null, 'Could not load the connection decision (' + error.message + '). Reload to retry.'));
+    });
+    return details;
+  }
+
+  function portalCard(portal) {
+    const card = node('article', 'portal-card');
+    card.dataset.state = portal.state;
+    const base = '/portals/' + encodeURIComponent(portal.id);
+    const badge = node('span', 'state-badge', portal.state);
+    const url = new URL(portal.url);
+    const heading = node('h3', 'portal-title');
+    const sourceLink = link('', portal.url);
+    for (const part of url.host.split(/(?<=[.-])/)) {
+      sourceLink.append(document.createTextNode(part), document.createElement('wbr'));
+    }
+    heading.append(sourceLink);
+    const source = node('p', 'source-path', url.pathname + url.search);
+    source.title = portal.url;
+    const identity = node('div', 'portal-identity');
+    identity.append(heading, source);
+    const top = node('div', 'portal-top');
+    top.append(identity, badge);
+    const held = node('span', 'portal-count', counts(portal.tenderCount));
+    let tenderRequest;
+    function readTenders() {
+      tenderRequest ??= get(base + '/tenders').catch(error => {
+        tenderRequest = null;
+        throw error;
+      });
+      return tenderRequest;
+    }
+    if (portal.tenderCount) {
+      readTenders().then(tenders => { held.textContent = counts(portal.tenderCount, tenders); }).catch(() => {});
+    }
+    const stats = node('div', 'card-stats');
+    stats.append(held, node('span', null, 'Last verified · ' + date(portal.lastSuccessAt)));
+    card.append(top, node('p', 'portal-reason', portal.reason), stats, connectionDetails(base),
+      portalDetails(base, readTenders));
+    return card;
+  }
+
+  const hasIssue = state => state === 'failed' || state === 'healing';
+
+  function applyFilter() {
+    if (snapshot === null) return;
+    let shown = 0;
+    for (const card of grid.children) {
+      const state = card.dataset.state;
+      card.hidden = !(filter.value === 'all' || state === filter.value || (filter.value === 'issues' && hasIssue(state)));
+      if (!card.hidden) shown++;
+    }
+    message.hidden = shown > 0;
+    message.textContent = snapshot.length ? 'No portals match this state.' : 'Register a portal through the API to begin monitoring.';
+  }
+
+  function renderOverview(portals) {
+    const serving = portals.filter(portal => portal.state === 'serving').length;
+    const issues = portals.filter(portal => hasIssue(portal.state)).length;
+    const held = portals.reduce((total, portal) => total + portal.tenderCount, 0);
+    byId('serving-metric').textContent = amount(serving) + ' / ' + amount(portals.length);
+    byId('tender-metric').textContent = amount(held);
+    byId('view-issues').hidden = issues === 0;
+    let status = portals.length === 1 ? '1 registered portal.' : amount(portals.length) + ' registered portals.';
+    if (issues) status += ' ' + (issues === 1 ? '1 needs attention.' : amount(issues) + ' need attention.');
+    else if (serving === portals.length && serving) status += serving === 1 ? ' Delivery is healthy.' : ' All are delivering.';
+    else if (portals.length) status += ' Attachment is in progress.';
+    byId('status').textContent = portals.length ? status : 'No portals registered';
+  }
+
+  async function load() {
+    if (loading) return;
+    loading = true;
+    byId('reload').setAttribute('aria-busy', 'true');
+    try {
+      const portals = await get('/portals');
+      const cards = portals.map(portalCard);
+      snapshot = portals;
+      grid.replaceChildren(...cards);
+      renderOverview(portals);
+      applyFilter();
+    } catch (error) {
+      byId('status').textContent = 'Could not load portals (' + error.message + ').'
+        + (snapshot ? ' Showing the last loaded overview.' : '');
+      if (!snapshot) {
+        message.textContent = 'Reload the dashboard to try again.';
+        message.hidden = false;
+      }
+    } finally {
+      loading = false;
+      byId('reload').removeAttribute('aria-busy');
+    }
+  }
+
+  filter.addEventListener('change', applyFilter);
+  for (const [id, state] of [['view-portals', 'all'], ['view-issues', 'issues']]) {
+    byId(id).addEventListener('click', () => { filter.value = state; applyFilter(); });
+  }
+  byId('reload').addEventListener('click', load);
+
+  const themeButtons = document.querySelectorAll('[data-theme-switch]');
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    byId('theme-color').content = theme === 'dark' ? '#0a0a1a' : '#fafafa';
+    const label = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+    for (const button of themeButtons) {
+      button.setAttribute('aria-label', label);
+      if (!button.querySelector('svg')) button.textContent = label;
+    }
+  }
+  applyTheme(document.documentElement.dataset.theme);
+  for (const button of themeButtons) {
+    button.addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      try { localStorage.setItem('watchtower-theme', next); } catch {}
+    });
+  }
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+    let saved = null;
+    try { saved = localStorage.getItem('watchtower-theme'); } catch {}
+    if (!saved) applyTheme(event.matches ? 'dark' : 'light');
+  });
+
+  const menu = byId('mobile-menu');
+  const menuButton = document.querySelector('.menu-toggle');
+  function setMenu(open) {
+    menu.hidden = !open;
+    menuButton.setAttribute('aria-expanded', String(open));
+    menuButton.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+  }
+  menuButton.addEventListener('click', () => setMenu(menu.hidden));
+  menu.addEventListener('click', event => { if (event.target.closest('a')) setMenu(false); });
+  document.addEventListener('click', event => { if (!event.target.closest('.masthead')) setMenu(false); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !menu.hidden) { setMenu(false); menuButton.focus(); }
+  });
+  matchMedia('(min-width: 1024px)').addEventListener('change', () => setMenu(false));
+  load();
+</script>
+</body>
+</html>

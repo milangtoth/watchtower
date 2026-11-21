@@ -1,0 +1,77 @@
+[
+  {
+    "id": "14088332",
+    "url": "https://www.etenders.gov.mt/epps/cft/prepareViewCfTWS.do?resourceId=14088332",
+    "title": "Tender for the Appointment of a Lead Professional Service Provider to Undertake the Preparation of a Master Plan for Land Reclamation to a Zone in Proximity to Il-Ponta ta' Bengħajsa",
+    "submissionDeadline": "2026-12-18T09:30:00+01:00",
+    "publicationDate": "2026-10-14",
+    "buyerName": "Malta Investments and Economic Advisory Ltd",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.mt/epps/cft/downloadContractDocument.do?documentId=14181919&resourceId=14088332",
+      "fileName": "Financial Bid Form.xlsx",
+      "sizeBytes": 21899,
+      "sha256": "e2f3165f440bbf3237ba3f0562f6cc422158215c55cd9bf383bad729de3314c4"
+    }
+  },
+  {
+    "id": "14073438",
+    "url": "https://www.etenders.gov.mt/epps/cft/prepareViewCfTWS.do?resourceId=14073438",
+    "title": "Works concession – request for proposals for a concession for the financing, construction, operation and maintenance of the complex of the Malta Film Studios in Kalkara, Malta, on a build, finance, operate and transfer (“BFOT”) basis",
+    "submissionDeadline": "2026-12-07T09:30:00+01:00",
+    "publicationDate": "2026-09-08",
+    "buyerName": "Malta Film Commission",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.mt/epps/cft/downloadContractDocument.do?documentId=14082563&resourceId=14073438",
+      "fileName": "01_Request for Proposals.pdf",
+      "sizeBytes": 1378333,
+      "sha256": "14b6509162db8ff2834210048de5f225829ec7b38b717cef8fde31253d3540e2"
+    }
+  },
+  {
+    "id": "14225090",
+    "url": "https://www.etenders.gov.mt/epps/cft/prepareViewCfTWS.do?resourceId=14225090",
+    "title": "TENDER FOR THE SUPPLY, DELIVERY, INSTALLATION, TESTING AND COMMISSIONING FOR A COMPLETE OUTDOOR PUBLIC-USE PARKOUR SYSTEM FOR SIĠĠIEWI LOCAL COUNCIL",
+    "submissionDeadline": "2026-12-01T10:00:00+01:00",
+    "publicationDate": "2026-10-30",
+    "buyerName": "Siggiewi Local Council",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.mt/epps/cft/downloadContractDocument.do?documentId=14225414&resourceId=14225090",
+      "fileName": "8_LCS 21 25 1 - Concept Equipment Drawings.pdf",
+      "sizeBytes": 502980,
+      "sha256": "90678ffcfdbedde466691130fc66bfea13e753b8b75d6caa1202f2e8596d9b2e"
+    }
+  },
+  {
+    "id": "13926846",
+    "url": "https://www.etenders.gov.mt/epps/cft/prepareViewCfTWS.do?resourceId=13926846",
+    "title": "CT2274/2026 - Services - Tender for the Implementation of a Fully Compliant European Digital Identity Wallet (EUDIW), Supporting Trust Ecosystem and use cases for the Malta Digital Innovation Authority (MDIA)",
+    "submissionDeadline": "2026-12-09T09:30:00+01:00",
+    "publicationDate": "2026-07-11",
+    "buyerName": "Department of Contracts",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.mt/epps/cft/downloadContractDocument.do?documentId=14005141&resourceId=13926846",
+      "fileName": "CT2274_2026 - Clarification Note 02.pdf",
+      "sizeBytes": 306287,
+      "sha256": "05bb351ae157201fb59e19c05bbdddb86dc771ed5ba443694d115fbbe438e6bf"
+    }
+  },
+  {
+    "id": "14281369",
+    "url": "https://www.etenders.gov.mt/epps/cft/prepareViewCfTWS.do?resourceId=14281369",
+    "title": "SPD7/2026/046 - FRAMEWORK CONTRACT IN LOTS FOR THE PROVISION OF CLEANING SERVICES EXCLUDING PRODUCTS AND MATERIALS FOR THE MINISTRY FOR THE ECONOMY, TECHNOLOGY AND STRATEGIC PROJECTS (METP) AND THE COMMERCE DEPARTMENT",
+    "submissionDeadline": "2026-12-21T09:30:00+01:00",
+    "publicationDate": "2026-11-20",
+    "buyerName": "Sectoral Procurement Directorate",
+    "status": "open",
+    "sampleDocument": {
+      "url": "https://www.etenders.gov.mt/epps/cft/downloadContractDocument.do?documentId=14293240&resourceId=14281369",
+      "fileName": "SPD72026046_METP_Financial Bid Form_Lot 1_Ministerial Departments - Output - Copy.xlsx",
+      "sizeBytes": 26500,
+      "sha256": "37a1604702cb34eca076598bf1af1d4ad9becee5118d4a3fa418708b3a38e91b"
+    }
+  }
+]

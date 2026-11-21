@@ -1,86 +1,358 @@
-# Our own test set. Goal: 4+ countries, 3+ portal software packages,
-# 5+ open tenders each with documents downloadable without login,
-# plus 1-2 portals blocked by login or captcha.
-#
-# - url: https://...
-#   country: DE
-#   software: ...
-#   kind: server-rendered | js-app | multi-step
-#   expect: serving | failed
-#
-# Seeded from the nine publishers Tender Atlas collects from (its feeds.py
-# SOURCES registry). `api` is the open-data endpoint Atlas reads; Watchtower
-# must still learn the public portal from `url` alone. `kind` and `expect`
-# are first guesses and need checking against a real Watchtower run.
+# Real-portal inventory, combined from the portal test set and the machine-learning
+# test set (reference snapshots from 2026-11-20). Pass only `url` to Watchtower.
+# `split: holdout` entries stay unseen until the final run. A qualified positive case
+# has five or more current tenders with documents that download without credentials.
+# `evidence` and `samples` point to independently collected answers for the evaluator.
+# `entry_url` is where the labelled method starts. A failed case has no usable method.
 portals:
-  - url: https://ted.europa.eu/en/
-    name: TED (Tenders Electronic Daily)
-    country: EU
-    software: TED
-    kind: js-app
-    expect: serving
-    api: https://api.ted.europa.eu/v3/notices/search
-
-  - url: https://oeffentlichevergabe.de/
-    name: Bekanntmachungsservice (DÖE)
-    country: DE
-    software: Bekanntmachungsservice
-    kind: js-app
-    expect: serving
-    api: https://oeffentlichevergabe.de/api/notice-exports
-
-  - url: https://www.boamp.fr/
-    name: BOAMP
-    country: FR
-    software: BOAMP (Opendatasoft API)
+  - name: UK Legal Aid Agency
+    url: https://www.gov.uk/government/collections/tenders-for-legal-aid-contracts
+    country: GB
+    software: GOV.UK Publishing Platform
     kind: server-rendered
+    split: development
     expect: serving
-    api: https://www.boamp.fr/api/explore/v2.1/catalog/datasets/boamp/records
+    best_method: json
+    entry_url: https://www.gov.uk/api/content/government/collections/tenders-for-legal-aid-contracts
+    readiness: attachment-verified
+    note: The public Content API enumerates the same seven current entries as the verified HTML baseline. All seven JSON detail pages expose stable IDs, publishing dates, buyer and attachment metadata. Deadlines remain in the source prose.
+    evidence: govuk-laa-baseline.json
 
-  - url: https://contrataciondelsectorpublico.gob.es/
-    name: Plataforma de Contratación del Sector Público (PLACSP)
-    country: ES
-    software: PLACSP
-    kind: multi-step
-    expect: serving
-    api: https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3
-
-  - url: https://ezamowienia.gov.pl/
-    name: Biuletyn Zamówień Publicznych (e-Zamówienia)
-    country: PL
-    software: e-Zamówienia
-    kind: js-app
-    expect: serving
-    api: https://ezamowienia.gov.pl/mo-board/api/v1/notice
-
-  - url: https://www.tenderned.nl/
-    name: TenderNed
+  - name: TenderNed
+    url: https://www.tenderned.nl/aankondigingen/overzicht
     country: NL
     software: TenderNed
     kind: js-app
+    split: development
     expect: serving
-    api: https://www.tenderned.nl/cms/nl/aanbesteden-in-cijfers/datasets-aanbestedingen
+    best_method: json
+    entry_url: https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties?page=0&size=50&publicatieDatumPreset=AF30
+    readiness: five-public-downloads-verified
+    note: The listing UI reads this public JSON route. It exposes page and total counts and the identifiers used to find notice details and documents.
+    evidence: tenderned-baseline.json
+    samples: NL.json
 
-  - url: https://www.etenders.gov.ie/
-    name: eTenders
-    country: IE
-    software: eTenders
+  - name: Deutsches Vergabeportal
+    url: https://dtvp.de/ausschreibungen/
+    country: DE
+    software: DTVP
     kind: multi-step
+    split: development
     expect: serving
-    api: https://data.gov.ie/dataset/contract-notices-published-on-etenders
+    best_method: html
+    entry_url: https://www.dtvp.de/Satellite/company/welcome.do
+    readiness: five-public-downloads-verified
+    note: The marketing pages repeated eight featured notices. The public Satellite table returned two distinct pages, with notice type, buyer, publication date, deadline and project links. The separate source baseline verifies five downloads.
+    evidence: dtvp-baseline.json
 
-  - url: https://www.find-tender.service.gov.uk/
-    name: Find a Tender
-    country: UK
+  - name: Ireland eTenders
+    url: https://www.etenders.gov.ie/epps/prepareCurrentOpportunities.do?currentType=cft
+    alternative_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?T01_ps=50&latest=true&searchType=cftFTS
+    country: IE
+    software: European Dynamics ePPS
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?searchType=cftFTS&latest=true
+    readiness: five-public-downloads-verified
+    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option.
+    evidence: etenders-ie-baseline.json
+    samples: IE.json
+
+  - name: Catalonia PSCP
+    url: https://contractaciopublica.cat/portal-api/ultimes-publicacions?page=0&size=100&tipus=104
+    public_page: https://contractaciopublica.cat/ca/inici
+    country: ES
+    software: PSCP
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://contractaciopublica.cat/portal-api/ultimes-publicacions?page=0&size=100&tipus=104
+    readiness: five-public-downloads-verified
+    note: The portal UI lists open notices using this JSON route. Five open tenders and administrative specifications verified. Watchtower attachment untested.
+    evidence: catalonia-pscp-baseline.json
+
+  - name: Masaryk University E-ZAK
+    url: https://zakazky.muni.cz/contract_index.html
+    country: CZ
+    software: E-ZAK
+    kind: server-rendered
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://zakazky.muni.cz/contract_index.html
+    note: The public E-ZAK listing links to detail pages with stable IDs, deadlines and downloadable documents recorded in CZ.json.
+    samples: CZ.json
+
+  - name: e-Zamówienia
+    url: https://www.ezamowienia.gov.pl/mp-client/search/list/
+    country: PL
+    software: e-Zamówienia
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://www.ezamowienia.gov.pl/mp-readmodels/api/Search/SearchTenders?PageNumber=1&PageSize=10
+    readiness: needs-five-download-baseline
+    note: The public proceedings UI uses this route. Two pages returned 10 distinct proceedings each with IDs, buyers and deadlines. The detail and document routes returned a public PDF.
+    evidence: https://ezamowienia.gov.pl/pl/
+
+  - name: eTendersNI search
+    url: https://etendersni.gov.uk/epps/prepareCurrentOpportunities.do?currentType=cft
+    country: GB
+    software: European Dynamics ePPS
+    kind: multi-step
+    split: development
+    expect: failed
+    readiness: blocked-verified
+    expected_blocker: CAPTCHA required by the search form
+
+  - name: Central Bedfordshire In-tend
+    url: https://in-tendhost.co.uk/centralbedfordshire/aspx/Tenders/Current
+    country: GB
+    software: In-tend
+    kind: multi-step
+    split: development
+    expect: failed
+    expected_blocker: Registration and an expression of interest are required for document access.
+    reason: Registration and an expression of interest are required for document access.
+    evidence: https://www.centralbedfordshire.gov.uk/business/procurement-and-tender-opportunities
+
+  - name: Find a Tender
+    url: https://www.find-tender.service.gov.uk/Search
+    country: GB
     software: Find a Tender
-    kind: server-rendered
+    kind: multi-step
+    split: development
     expect: serving
-    api: https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages
+    best_method: ocds
+    entry_url: https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=25
+    readiness: needs-five-download-baseline
+    note: Two cursor pages returned 25 distinct releases each. All 25 first-page releases carried deadlines and 12 carried document links.
+    evidence: https://www.gov.uk/government/publications/open-contracting
 
-  - url: https://www.contractsfinder.service.gov.uk/
-    name: Contracts Finder
-    country: UK
-    software: Contracts Finder
-    kind: server-rendered
+  - name: Berlin public procurement
+    url: https://www.berlin.de/vergabeplattform/veroeffentlichungen/bekanntmachungen/
+    country: DE
+    software: RIB iTWO tender
+    kind: multi-step
+    split: development
     expect: serving
-    api: https://www.contractsfinder.service.gov.uk/harvester/Notices/Data/CSV/
+    best_method: html
+    entry_url: https://www.berlin.de/vergabeplattform/veroeffentlichungen/bekanntmachungen/
+    readiness: needs-five-download-baseline
+    note: Distinct HTML pages expose deadlines and link to RIB tender details. The RSS sample contained 49 recent notices, while the HTML listing linked through offset 240.
+    evidence: https://www.berlin.de/vergabeplattform/ueber-die-vergabeplattform/download-von-unterlagen/
+
+  - name: Lower Saxony procurement marketplace
+    url: https://vergabe.niedersachsen.de/Satellite/company/welcome.do
+    country: DE
+    software: cosinex Satellite
+    kind: server-rendered
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://vergabe.niedersachsen.de/Satellite/company/welcome.do
+    readiness: needs-five-download-baseline
+    note: Two distinct public result pages expose the notice title, buyer, publication date, bid deadline and project links.
+
+  - name: Plzeň Region E-ZAK
+    url: https://ezak.cnpk.cz/contract_index.html?direction=asc&orderby=name&page=1&state=OFFERS&type=all
+    country: CZ
+    software: E-ZAK
+    kind: server-rendered
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://ezak.cnpk.cz/contract_index.html?direction=asc&orderby=name&page=1&state=OFFERS&type=all
+    readiness: needs-five-download-baseline
+    note: The active-offers table has public detail links and pagination. One linked invitation downloaded as a PDF without credentials.
+
+  - name: Charles University E-ZAK
+    url: https://zakazky.cuni.cz/contract_index.html
+    country: CZ
+    software: E-ZAK
+    kind: server-rendered
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://zakazky.cuni.cz/contract_index.html
+    readiness: needs-five-download-baseline
+    note: The listing links to public tender pages with stable IDs and attachment URLs. One linked tender specification downloaded as a PDF.
+
+  - name: Hradec Králové Region E-ZAK
+    url: https://zakazky.cenakhk.cz/contract_index.html
+    country: CZ
+    software: E-ZAK
+    kind: server-rendered
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://zakazky.cenakhk.cz/contract_index.html
+    readiness: needs-five-download-baseline
+    note: Each of the first two pages returned 15 distinct tender links. One linked tender invitation downloaded as a PDF.
+
+  - name: Czech National Electronic Tool
+    url: https://nen.nipez.cz/verejne-zakazky
+    country: CZ
+    software: NEN
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://nen.nipez.cz/verejne-zakazky
+    readiness: needs-five-download-baseline
+    note: The initial HTML includes public detail links. A sampled notice linked to its documentation tab, and a published DOCX downloaded anonymously.
+
+  - name: Brazil National Public Procurement Portal
+    url: https://pncp.gov.br/app/editais
+    country: BR
+    software: PNCP
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://pncp.gov.br/api/consulta/v1/contratacoes/proposta?dataFinal=20991231&pagina=1&tamanhoPagina=10
+    readiness: needs-five-download-baseline
+    note: The open-proposals API exposes notice IDs, buyers, deadlines and result totals. Two pages were sampled, and the public files API returned a downloadable PDF for a sampled notice.
+    evidence: https://pncp.gov.br/api/consulta/swagger-ui/index.html
+
+  - name: Prozorro
+    url: https://prozorro.gov.ua/en/search/tender
+    country: UA
+    software: OpenProcurement
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://public-api.prozorro.gov.ua/api/2.5/tenders?descending=1&limit=10
+    readiness: needs-five-download-baseline
+    note: The public ID feed returned a distinct cursor page. A sampled tender detail returned the title, buyer, deadline and linked bidding documents. One DOCX downloaded anonymously.
+    evidence: https://github.com/ProzorroUKR/openprocurement.api
+
+  - name: Luxembourg public procurement portal
+    url: https://pmp.b2g.etat.lu/?AllCons=&EnCours=&page=Entreprise.EntrepriseAdvancedSearch
+    country: LU
+    software: Achatpublic
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://pmp.b2g.etat.lu/?AllCons=&EnCours=&page=Entreprise.EntrepriseAdvancedSearch
+    readiness: needs-five-download-baseline
+    note: The current consultations page is public and the consultation dossier form offers an anonymous download option. The form submission and full pagination remain to be checked.
+    evidence: https://marches.public.lu/fr/acteurs/direction/portail-marches-publics.html
+
+  - name: Massachusetts COMMBUYS
+    url: https://www.commbuys.com/bso/view/search/external/advancedSearchBid.xhtml?openBids=true
+    country: US
+    software: COMMBUYS
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://www.commbuys.com/bso/view/search/external/advancedSearchBid.xhtml?openBids=true
+    readiness: needs-five-download-baseline
+    note: The public open-bids HTML lists stable bid IDs and links to detail pages. One sampled detail showed a buyer, bid opening date and two attachments offered through a form submission.
+
+  - name: Slovakia Public Procurement Office
+    url: https://www.uvo.gov.sk/vyhladavanie/vyhladavanie-zakaziek
+    country: SK
+    software: ÚVO
+    kind: server-rendered
+    split: development
+    expect: serving
+    best_method: html
+    entry_url: https://www.uvo.gov.sk/vyhladavanie/vyhladavanie-zakaziek
+    readiness: needs-five-download-baseline
+    note: The public results include buyer and publication date and link to unique tender detail pages. A sampled detail has a public documents tab.
+
+  - name: BOAMP
+    url: https://www.boamp.fr/pages/recherche/?sort=dateparution
+    country: FR
+    software: BOAMP
+    kind: multi-step
+    split: holdout
+    expect: serving
+    best_method: json
+    entry_url: https://www.boamp.fr/api/explore/v2.1/catalog/datasets/boamp/records?order_by=dateparution%20desc&limit=10
+    readiness: needs-five-download-baseline
+    note: The public data API returned distinct pages with notice IDs, buyers, dates, deadlines and notice URLs.
+    evidence: https://www.boamp.fr/pages/donnees-ouvertes-et-api/
+
+  - name: Contracts Finder
+    url: https://www.contractsfinder.service.gov.uk/Search
+    country: GB
+    software: Contracts Finder
+    kind: multi-step
+    split: holdout
+    expect: serving
+    best_method: ocds
+    entry_url: https://www.contractsfinder.service.gov.uk/Published/Notices/OCDS/Search?limit=10&stages=tender
+    readiness: needs-five-download-baseline
+    note: The published OCDS search returned ten tender-stage releases with document references and a next-page link.
+    evidence: https://www.gov.uk/government/publications/open-contracting
+
+  - name: Malta eTenders
+    url: https://www.etenders.gov.mt/epps/prepareCurrentOpportunities.do?currentType=cft
+    country: MT
+    software: European Dynamics ePPS
+    kind: multi-step
+    split: holdout
+    expect: failed
+    expected_blocker: CAPTCHA required by the current opportunities search form
+    note: The submitted listing requires a CAPTCHA. Previously collected public detail and attachment URLs are retained in the baseline.
+    samples: MT.json
+
+  - name: Toruń platformazakupowa
+    url: https://platformazakupowa.pl/pn/wszz_torun/proceedings
+    country: PL
+    software: Open Nexus platformazakupowa.pl
+    kind: server-rendered
+    split: holdout
+    expect: serving
+    best_method: html
+    entry_url: https://platformazakupowa.pl/pn/wszz_torun/proceedings
+    note: The public HTML lists the same tender detail URLs as the baseline with verified attachments.
+    samples: PL.json
+
+  - name: Tenders Electronic Daily
+    url: https://ted.europa.eu/en/search/result
+    country: EU
+    software: TED
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: json
+    entry_url: https://api.ted.europa.eu/v3/notices/search
+    readiness: needs-five-download-baseline
+    note: Added from the Tender Atlas source list. Atlas reads the public anonymous search API, which returns notice IDs, buyers, CPV codes, deadlines and lot document URLs. Not yet run through Watchtower.
+    evidence: https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html
+
+  - name: Bekanntmachungsservice
+    url: https://oeffentlichevergabe.de/ui/de/search
+    country: DE
+    software: Bekanntmachungsservice
+    kind: js-app
+    split: development
+    expect: serving
+    best_method: ocds
+    entry_url: https://oeffentlichevergabe.de/api/notice-exports?format=ocds.zip
+    readiness: needs-five-download-baseline
+    note: Added from the Tender Atlas source list. Atlas reads the daily federal OCDS export, which lags by one day. Notice PDFs are at /api/notices/{id}?format=pdf. Not yet run through Watchtower.
+    evidence: https://oeffentlichevergabe.de/ui/de/publicationPolicy
+
+  - name: Plataforma de Contratación del Sector Público
+    url: https://contrataciondelsectorpublico.gob.es/wps/portal/plataforma
+    country: ES
+    software: PLACSP
+    kind: multi-step
+    split: development
+    expect: serving
+    best_method: atom
+    entry_url: https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom
+    readiness: needs-five-download-baseline
+    note: Added from the Tender Atlas source list. Atlas reads the national Atom syndication feed of contracting-profile notices with CODICE XML entries, excluding minor contracts. Not yet run through Watchtower.
+    evidence: https://contrataciondelsectorpublico.gob.es/wps/portal/DatosAbiertos

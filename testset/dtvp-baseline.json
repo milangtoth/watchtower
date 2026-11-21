@@ -1,0 +1,56 @@
+{
+  "portal": "https://dtvp.de/ausschreibungen/",
+  "verified_on": "2026-11-20",
+  "documents": [
+    {
+      "listing_item": "https://dtvp.de/ausschreibungen/baureinigung-cxp4dkt4yee/",
+      "workspace": "https://www.dtvp.de/Satellite/public/company/project/CXP4DKT4YEE/de/overview",
+      "document": "https://www.dtvp.de/Satellite/public/company/project/CXP4DKT4YEE/de/documents/address/KEV+110.1+%2528B%2529+A+Aufforderung+zur+Angebotsabgabe.pdf",
+      "observed_deadline_dates": [
+        "21.12.2026"
+      ],
+      "sha256": "4838260e066d50604850a133b0c17096bc695be0b2a89fb3e428eaf650c11f54",
+      "size": 720087
+    },
+    {
+      "listing_item": "https://dtvp.de/ausschreibungen/oegp-sow-boehlen-technikumsversuch-zur-grundwasserreinigung-mittels-bodenvertikalfilter-cxp4ds9m1dg/",
+      "workspace": "https://www.dtvp.de/Satellite/public/company/project/CXP4DS9M1DG/de/overview",
+      "document": "https://www.dtvp.de/Satellite/public/company/project/CXP4DS9M1DG/de/documents/address/%25C3%2596GP+B%25C3%25B6hlen_2.474_FBL+631_EU_ohne_Lose.pdf",
+      "observed_deadline_dates": [
+        "18.12.2026"
+      ],
+      "sha256": "f59205759f4d357627166a2d7e051d4b26b4df7736869704e3c4402754fb43d3",
+      "size": 474055
+    },
+    {
+      "listing_item": "https://dtvp.de/ausschreibungen/projektleitung-flusskreuzfahrt-cxp4dnn4yjp/",
+      "workspace": "https://www.dtvp.de/Satellite/public/company/project/CXP4DNN4YJP/de/overview",
+      "document": "https://www.dtvp.de/Satellite/public/company/project/CXP4DNN4YJP/de/documents/address/20261118+Aufforderung+zur+Angebotsabgabe.pdf",
+      "observed_deadline_dates": [
+        "15.12.2026"
+      ],
+      "sha256": "89b0245b66022314e22a21a51d4f2a49d1a647a84d156d656a37364e1b8aa56d",
+      "size": 250669
+    },
+    {
+      "listing_item": "https://dtvp.de/ausschreibungen/dkf-1-ba-schadstoffsanierung-und-entkernung-cxp4d0fmtr9/",
+      "workspace": "https://www.dtvp.de/Satellite/public/company/project/CXP4D0FMTR9/de/overview",
+      "document": "https://www.dtvp.de/Satellite/public/company/project/CXP4D0FMTR9/de/documents/address/211.pdf",
+      "observed_deadline_dates": [
+        "16.12.2026"
+      ],
+      "sha256": "f12b4fb16c16c4b11d02706f70275755586a0393c1fde847ffbba72aa4d04b8d",
+      "size": 80753
+    },
+    {
+      "listing_item": "https://dtvp.de/ausschreibungen/ausschreibung-ueber-den-betrieb-hosting-und-weiterentwicklung-der-website-www-kkh-de-inklusive-migration-auf-ein-zukunftsfaehiges-cms-system-cxp4d59m7la/",
+      "workspace": "https://www.dtvp.de/Satellite/public/company/project/CXP4D59M7LA/de/overview",
+      "document": "https://www.dtvp.de/Satellite/public/company/project/CXP4D59M7LA/de/documents/address/02_Bewerbungsbedingungen_TW_V3.pdf",
+      "observed_deadline_dates": [
+        "03.12.2026"
+      ],
+      "sha256": "0da896708645a85bbc687743fa8e8f6a394299d1c968aa42a6dbf3e0c5afec9e",
+      "size": 99410
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "portal": "https://www.etenders.gov.ie/epps/quickSearchAction.do?T01_ps=50&latest=true&searchType=cftFTS",
+  "verified_on": "2026-11-20",
+  "documents": [
+    {
+      "listing_item": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9545785",
+      "title": "Hiring of Portable Air Conditioning Units for Children's Health Ireland (CHI)",
+      "buyer": "Children's Health Ireland (CHI)",
+      "deadline": "2026-12-23T17:00:00+00:00",
+      "document_index": "https://www.etenders.gov.ie/epps/cft/listContractDocuments.do?resourceId=9545785",
+      "anonymous_download": "https://www.etenders.gov.ie/epps/cft/prepareAnonymousDownload.do?resourceId=9545785&documentId=9545937",
+      "document": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9545937&resourceId=9545785",
+      "filename": "Final Tender Documents.zip",
+      "sha256": "38cc001fee4d7938c0ca900ddbadccf46faa99f687e65b92243a949a1f8c42c8",
+      "size": 1178507
+    },
+    {
+      "listing_item": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9544683",
+      "title": "Tender for Procurement of a Recruitment company to deliver a managed recruitment competition for Graduate positions in the national Graduate recruitment campaign 2027",
+      "buyer": "Local Government Management Agency",
+      "deadline": "2026-12-16T15:00:00+00:00",
+      "document_index": "https://www.etenders.gov.ie/epps/cft/listContractDocuments.do?resourceId=9544683",
+      "anonymous_download": "https://www.etenders.gov.ie/epps/cft/prepareAnonymousDownload.do?resourceId=9544683&documentId=9544917",
+      "document": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9544917&resourceId=9544683",
+      "filename": "Tender - Graduate recruitment campaign 2027.zip",
+      "sha256": "86a3f892ec11d0c38055e3212046fbad53fcf464e3316446349e56ed87f33bd5",
+      "size": 196938
+    },
+    {
+      "listing_item": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9543660",
+      "title": "Establishment of a Single Party Framework Agreement for the Provision, Production, Event Management and Delivery for Road Safety Roadshow for Donegal County Council",
+      "buyer": "Donegal County Council_1193",
+      "deadline": "2026-12-21T16:00:00+00:00",
+      "document_index": "https://www.etenders.gov.ie/epps/cft/listContractDocuments.do?resourceId=9543660",
+      "anonymous_download": "https://www.etenders.gov.ie/epps/cft/prepareAnonymousDownload.do?resourceId=9543660&documentId=9543745",
+      "document": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9543745&resourceId=9543660",
+      "filename": "Appendix A Specification.pdf",
+      "sha256": "3e871b6b854930a686daec668d45ca783d7e369c8afba4d4d4179e48a9283d13",
+      "size": 240647
+    },
+    {
+      "listing_item": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9544118",
+      "title": "Donegal County Council - Ecological Surveys and Biodiversity, Habitat and Invasive Species Management Planning – Cill Ulta and Bhaile Chonaill Estate, An Fál Carrach",
+      "buyer": "Donegal County Council_1193",
+      "deadline": "2026-12-14T12:00:00+00:00",
+      "document_index": "https://www.etenders.gov.ie/epps/cft/listContractDocuments.do?resourceId=9544118",
+      "anonymous_download": "https://www.etenders.gov.ie/epps/cft/prepareAnonymousDownload.do?resourceId=9544118&documentId=9544319",
+      "document": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9544319&resourceId=9544118",
+      "filename": "Request for Tender Contract Open Procedure_Biodiversity and IAS_Fal Carrach.pdf",
+      "sha256": "e179e4679ee3cf3a4980ad7e466439b660c9c0d0013d32c475e3741dada8737f",
+      "size": 1159990
+    },
+    {
+      "listing_item": "https://www.etenders.gov.ie/epps/cft/prepareViewCfTWS.do?resourceId=9540962",
+      "title": "Establishment of a Multiparty Framework for the provision of Domestic Energy Efficiency Retrofitting services in County Donegal",
+      "buyer": "Donegal County Council_1193",
+      "deadline": "2027-01-08T12:00:00+00:00",
+      "document_index": "https://www.etenders.gov.ie/epps/cft/listContractDocuments.do?resourceId=9540962",
+      "anonymous_download": "https://www.etenders.gov.ie/epps/cft/prepareAnonymousDownload.do?resourceId=9540962&documentId=9542240",
+      "document": "https://www.etenders.gov.ie/epps/cft/downloadContractDocument.do?documentId=9542240&resourceId=9540962",
+      "filename": "Appendix 2 Framework Agreement.pdf",
+      "sha256": "660061ef619f553b4f50d5bc98005ed4e61d9b9710415e8b67b4c2f2b07dfad7",
+      "size": 1010511
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "chosen": {
+    "method": "ocds",
+    "entryUrl": "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=100",
+    "foundVia": "API documentation link on the start page",
+    "httpStatus": 200,
+    "contentType": "application/json",
+    "sampleItems": 100,
+    "fieldsSeen": ["title", "deadline", "buyer", "documents", "cpv", "status"],
+    "hasPagination": true,
+    "score": 0.91
+  },
+  "alternatives": [
+    {
+      "method": "feed",
+      "entryUrl": "https://www.find-tender.service.gov.uk/Search/Results.rss",
+      "foundVia": "link rel=alternate",
+      "httpStatus": 200,
+      "contentType": "application/rss+xml",
+      "sampleItems": 20,
+      "fieldsSeen": ["title", "deadline"],
+      "hasPagination": false,
+      "score": 0.54
+    },
+    {
+      "method": "html",
+      "entryUrl": "https://www.find-tender.service.gov.uk/Search/Results",
+      "foundVia": "start page",
+      "httpStatus": 403,
+      "contentType": "text/html",
+      "sampleItems": 0,
+      "fieldsSeen": [],
+      "hasPagination": false,
+      "score": 0.08
+    }
+  ],
+  "rationale": "The HTML search returns HTTP 403 to our client, so scraping cannot deliver. The official OCDS release API answers with 100 tenders per page, follows a next link, and carries title, deadline, buyer and documents, which covers every required field.",
+  "model": "gpt-5.4",
+  "decidedAt": "2026-11-20T21:40:12+00:00",
+  "attempt": 2
+}

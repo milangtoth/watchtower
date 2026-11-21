@@ -6,3 +6,15 @@ __pycache__/
 data/*
 !data/.gitkeep
 .pytest_cache/
+
+/target/
+/node_modules/
+/storybook-static/
+
+/src/dashboard/node_modules/
+/src/dashboard/elevenlabs-sdk.js
+
+/testset/fixture-portal/out/
+
+/tender-atlas-*.jsonl
+/Tender Atlas - source/Atlas library/

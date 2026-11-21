@@ -1,0 +1,61 @@
+{
+  "portal": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties?page=0&size=50&publicatieDatumPreset=AF30",
+  "verified_on": "2026-11-20",
+  "documents": [
+    {
+      "listing_item": "https://www.tenderned.nl/aankondigingen/overzicht/450453",
+      "title": "Vernieuwen Geo-stack",
+      "buyer": "Nederlands Instituut Publieke Veiligheid",
+      "deadline": "2027-04-08T12:00:00+02:00",
+      "document_index": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450453/documenten",
+      "document": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450453/documenten/14824518/content",
+      "filename": "Beschrijvend Document Vernieuwen Geo-stack.pdf",
+      "sha256": "9715d2ea4fc65f3bc8d689de31094dd3cc75ee24992513aa5b0c0c61c09b6fd5",
+      "size": 1053714
+    },
+    {
+      "listing_item": "https://www.tenderned.nl/aankondigingen/overzicht/450441",
+      "title": "B006-Multifunctionals",
+      "buyer": "Stichting Curio Onderwijsgroep West-Brabant",
+      "deadline": "2026-12-08T13:00:00+01:00",
+      "document_index": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450441/documenten",
+      "document": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450441/documenten/14921475/content",
+      "filename": "B006 - Aanbestedingsleidraad.pdf",
+      "sha256": "dabfa3c4115ea0d706b1fb552be78c9fe32a9c7411e861c9ea6668bb5fb56f11",
+      "size": 1145785
+    },
+    {
+      "listing_item": "https://www.tenderned.nl/aankondigingen/overzicht/450411",
+      "title": "Rijksbrede Europese Aanbesteding Inkoop(advies)diensten en Contract- en leveranciersmanagement 2027 - 2031",
+      "buyer": "Ministerie van Infrastructuur en Waterstaat",
+      "deadline": "2026-12-18T11:00:00+01:00",
+      "document_index": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450411/documenten",
+      "document": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450411/documenten/14664593/content",
+      "filename": "Beschrijvend Document ICL 2027-2031 V1.0.pdf",
+      "sha256": "12248a2e98f900920d21ea4f4c6100b0728098ef57ba18480504a1148feb1516",
+      "size": 710857
+    },
+    {
+      "listing_item": "https://www.tenderned.nl/aankondigingen/overzicht/450406",
+      "title": "EA Bedrijfsfietsen en handhavingsfietsen Gemeente Zwolle",
+      "buyer": "Gemeente Zwolle",
+      "deadline": "2026-12-02T12:00:00+01:00",
+      "document_index": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450406/documenten",
+      "document": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450406/documenten/15326789/content",
+      "filename": "Beschrijvend document EA Bedrijfsfietsen en handhavingsfietsen aangepast na NvI.pdf",
+      "sha256": "6a55c4ae34fb13b043fb4e2efe929ae0342646730f65bb7f82555d8050e5eb5d",
+      "size": 443049
+    },
+    {
+      "listing_item": "https://www.tenderned.nl/aankondigingen/overzicht/450401",
+      "title": "Raamovereenkomst onderhoud Openbare verlichting Edam-Volendam",
+      "buyer": "Gemeente Edam-Volendam",
+      "deadline": "2026-12-17T10:00:00+01:00",
+      "document_index": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450401/documenten",
+      "document": "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/450401/documenten/15101360/content",
+      "filename": "26.412-OW - Raamovereenkomst openbare verlichting Ed-Vo.pdf",
+      "sha256": "642d9e596e037828c3acb9a790fd762b13ccef59010e2c36a016e0f7b97e4354",
+      "size": 639381
+    }
+  ]
+}
