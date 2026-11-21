@@ -493,7 +493,7 @@ pub async fn read(
         }
         if seen_pages.len() > LISTING_PAGE_LIMIT {
             return Err(ReadFailure::Incomplete(format!(
-                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders, such as a status filter or a search form filter link"
+                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders, such as a status filter or a search form filter link from the portal's advanced search page"
             )));
         }
         listing_pages.push(url.to_string());
@@ -687,7 +687,7 @@ fn too_many_pages(listing: &ListingPage, recipe: &Recipe) -> Result<(), ReadFail
         .max();
     match pages {
         Some(pages) if pages > LISTING_PAGE_LIMIT => Err(ReadFailure::Incomplete(format!(
-            "The listing has {pages} pages, more than {LISTING_PAGE_LIMIT}; use a listing limited to open tenders, such as a status filter or a search form filter link"
+            "The listing has {pages} pages, more than {LISTING_PAGE_LIMIT}; use a listing limited to open tenders, such as a status filter or a search form filter link from the portal's advanced search page"
         ))),
         _ => Ok(()),
     }
@@ -2681,6 +2681,79 @@ mod reader_fix_tests {
                 .await
                 .unwrap();
         assert!(documents.is_empty());
+    }
+
+    /// European Dynamics ePPS (Ireland's eTenders): the "latest" listing mixes every status over
+    /// 302 pages, and its own search form carries only hidden fields. The advanced search page,
+    /// linked from the listing, offers the status select whose filter link reads open tenders.
+    #[test]
+    fn epps_advanced_search_status_is_offered_as_a_filter_link_and_fits_the_page_limit() {
+        let latest = Page {
+            url: Url::parse(
+                "https://etenders.example/epps/quickSearchAction.do?searchType=cftFTS&latest=true",
+            )
+            .unwrap(),
+            body: include_str!("../tests/fixtures/epps/latest.html").into(),
+        };
+        let links = sample_page(&latest, 16_000).links;
+        assert!(
+            !links
+                .iter()
+                .any(|link| link.label.starts_with("Search form filter"))
+        );
+        let advanced = links
+            .iter()
+            .find(|link| link.label.contains("Advanced search"))
+            .expect("advanced search link");
+        assert_eq!(
+            advanced.url,
+            "https://etenders.example/epps/prepareAdvancedSearch.do?type=cftFTS"
+        );
+
+        let search = Page {
+            url: Url::parse(&advanced.url).unwrap(),
+            body: include_str!("../tests/fixtures/epps/advanced_search.html").into(),
+        };
+        let filters: Vec<_> = sample_page(&search, 16_000)
+            .links
+            .into_iter()
+            .filter(|link| link.label.starts_with("Search form filter"))
+            .map(|link| (link.label, link.url))
+            .collect();
+        assert!(
+            filters.contains(&(
+                "Search form filter: Tender Submission".into(),
+                "https://etenders.example/epps/viewCFTSAction.do?status=cft.status.tender.submission"
+                    .into()
+            )),
+            "{filters:?}"
+        );
+
+        let recipe: Recipe = serde_json::from_value(serde_json::json!({
+            "listing": "html", "items": "#T01 tbody tr",
+            "detail_link": {"path": "a[href*=prepareViewCfTWS]", "attribute": "href"},
+            "next": {"path": "ul.pagination a.page-link", "attribute": "href"}
+        }))
+        .unwrap();
+        let listing = parse_listing(&latest, &recipe).unwrap();
+        let error = too_many_pages(&listing, &recipe).err().unwrap().to_string();
+        assert!(error.contains("302 pages"), "{error}");
+        assert!(error.contains("advanced search page"), "{error}");
+
+        // The status filter's result pages the same way, over 59 pages.
+        let filtered = Page {
+            url: Url::parse(
+                "https://etenders.example/epps/viewCFTSAction.do?status=cft.status.tender.submission",
+            )
+            .unwrap(),
+            body: latest
+                .body
+                .replace("&amp;searchType=cftFTS&amp;latest=true", "&amp;status=cft.status.tender.submission")
+                .replace("d-3680175-p=302", "d-3680175-p=59"),
+        };
+        let listing = parse_listing(&filtered, &recipe).unwrap();
+        assert_eq!(listing.rows.len(), 2);
+        too_many_pages(&listing, &recipe).unwrap();
     }
 }
 

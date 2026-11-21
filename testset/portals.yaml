@@ -65,11 +65,20 @@ portals:
     split: development
     expect: serving
     best_method: html
-    entry_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?searchType=cftFTS&latest=true
+    entry_url: https://www.etenders.gov.ie/epps/viewCFTSAction.do?status=cft.status.tender.submission
     readiness: five-public-downloads-verified
-    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option. Rechecked 2026-11-21 from a normal connection, so the live run's CAPTCHA failure is not a real block. Listing pages 1-3 each returned 10 notices and a detail page loaded, all without a CAPTCHA. The only "captcha" on the listing is an empty hidden form field (input name="captcha"), which a model check can mistake for a challenge.
+    note: The current opportunities URL redirects to the server-rendered latest listing (quickSearchAction.do?searchType=cftFTS&latest=true) with deadlines. Five source downloads were verified through the public Proceed without association option. Rechecked 2026-11-21 from a normal connection, so the live run's CAPTCHA failure is not a real block. Listing pages 1-3 each returned 10 notices and a detail page loaded, all without a CAPTCHA. The only "captcha" on the listing is an empty hidden form field (input name="captcha"), which a model check can mistake for a challenge.
     evidence: etenders-ie-baseline.json
     samples: IE.json
+    open_listing_route: >-
+      Checked 2026-11-21 with eight read-only requests. The latest listing
+      (quickSearchAction.do?searchType=cftFTS&latest=true) mixes every status over 302 pages of 10,
+      and ignores a status query parameter. Its own form has only hidden fields. The Advanced search
+      page it links (/epps/prepareAdvancedSearch.do?type=cftFTS) is a POST form with a CAPTCHA
+      field, but its action accepts the status select as a GET without one, with or without a
+      session cookie. Sampling that page yields the "Search form filter: Tender Submission" link
+      above: 59 pages, all in Tender Submission, with GET page links (d-3680175-p=2) that keep
+      the filter.
 
   - name: Catalonia PSCP
     url: https://contractaciopublica.cat/portal-api/ultimes-publicacions?page=0&size=100&tipus=104
