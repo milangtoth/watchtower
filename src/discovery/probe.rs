@@ -2,14 +2,17 @@
 //! model call. The candidates feed the ranker and the model's connection decision.
 //!
 //! Detectors run in order within `REQUEST_BUDGET` requests:
-//! 1. the start page (HTML alternates and machine links, or a JSON, OCDS, feed or sitemap body),
+//! 1. the start page (HTML alternates and machine links, or a JSON, OCDS, feed or sitemap body).
+//!    When it offers no machine links, as with a JavaScript app shell, the site's home page is
+//!    read too (following one `<meta http-equiv="refresh">`). Pages of the GOV.UK publishing
+//!    platform, recognised by their `govuk:` meta tags, offer their Content API JSON twin,
 //! 2. sitemaps from `robots.txt`, `<link rel="sitemap">` or `/sitemap.xml`,
 //! 3. one sample of each discovered feed or JSON URL,
 //! 4. links to TED notices,
 //! 5. the start page as an HTML fallback, which is always offered.
 //!
-//! Detection is generic: there are no per-portal rules, so nothing depends on which portals are
-//! in the test set. Every request goes through the portal's rate-limited client. A login or
+//! Detection is generic: there are no per-portal rules, only platform conventions, so nothing
+//! depends on which portals are in the test set. Every request goes through the portal's rate-limited client. A login or
 //! CAPTCHA on the start page ends probing with `ReadFailure::Blocked`. A plain HTTP 403 on the
 //! start page does not: the site's sitemaps may still be readable, so they are still tried.
 
@@ -31,6 +34,10 @@ const SITEMAP_REQUESTS: usize = 4;
 const MAX_SAMPLES: usize = 6;
 /// Same-site links whose path or text suggests machine access, before sampling.
 const MAX_MACHINE_LINKS: usize = 4;
+/// The home page and one meta refresh, read when the start page offers no machine links.
+const HOME_REQUESTS: usize = 2;
+/// Table headers and labels longer than this are content, not field names.
+const LABEL_LENGTH: usize = 60;
 /// JSON items and feed entries inspected for field names.
 const FIELD_SAMPLE: usize = 20;
 
@@ -151,10 +158,28 @@ impl<S: Source> Probe<'_, S> {
                         let page = inspect_html(&sample.url, &sample.body);
                         fallback.entry_url = sample.url.to_string();
                         fallback.sample_items = page.notice_links;
+                        fallback.fields_seen = page.fields.clone();
                         fallback.has_pagination = page.has_next;
+                        if page.govuk
+                            && let Some(url) = govuk_content_api(&sample.url)
+                        {
+                            leads.push(Lead {
+                                url,
+                                found_via: "GOV.UK content API",
+                                hint: Some(ConnectionMethod::Json),
+                            });
+                        }
                         leads.extend(page.leads);
                         sitemap_roots.extend(page.sitemaps);
                         ted = page.ted;
+                        if leads.is_empty() {
+                            let home = self.home_page(&sample.url).await;
+                            leads.extend(home.leads);
+                            sitemap_roots.extend(home.sitemaps);
+                            if ted.is_none() {
+                                ted = home.ted;
+                            }
+                        }
                     }
                     parsed => self.push_parsed(&sample, parsed, "start page", None),
                 }
@@ -213,6 +238,41 @@ impl<S: Source> Probe<'_, S> {
         }
         self.push(fallback);
         Ok(self.candidates)
+    }
+
+    /// Reads the site's home page when the start page offers no machine links, as with a
+    /// JavaScript app shell whose links only exist after scripts run. Follows one same-site
+    /// `<meta http-equiv="refresh">`. Links found there are reported as home page links.
+    async fn home_page(&mut self, start: &Url) -> HtmlPage {
+        let mut found = HtmlPage::default();
+        let Ok(mut url) = start.join("/") else {
+            return found;
+        };
+        for _ in 0..HOME_REQUESTS {
+            if url.path() == start.path() && url.query() == start.query() {
+                break;
+            }
+            let Some(Ok(sample)) = self.fetch(url.clone()).await else {
+                break;
+            };
+            if parse_body(&sample.body, sample.content_type.as_deref()) != Parsed::Html {
+                break;
+            }
+            let page = inspect_html(&sample.url, &sample.body);
+            match page.refresh.clone() {
+                Some(next) if page.leads.is_empty() && related_host(&next, start) => url = next,
+                _ => {
+                    found = page;
+                    break;
+                }
+            }
+        }
+        for lead in &mut found.leads {
+            if lead.found_via == "start page link" {
+                lead.found_via = "home page link";
+            }
+        }
+        found
     }
 
     async fn fetch(&mut self, url: Url) -> Option<Result<Sample, ReadFailure>> {
@@ -566,20 +626,38 @@ pub(crate) fn field_for_key(key: &str) -> Option<&'static str> {
         .collect::<String>()
         .to_lowercase();
     let has = |words: &[&str]| words.iter().any(|word| key.contains(word));
-    if matches!(
-        key.as_str(),
-        "id" | "ocid"
-            | "ref"
-            | "reference"
-            | "identifier"
-            | "guid"
-            | "noticeid"
-            | "noticenumber"
-            | "idweb"
-            | "objectid"
-            | "publicationnumber"
-            | "referencenumber"
-    ) {
+    let named_id = key == "id"
+        || [
+            "notice",
+            "content",
+            "tender",
+            "object",
+            "record",
+            "release",
+            "procedure",
+            "contract",
+            "publication",
+        ]
+        .iter()
+        .any(|noun| key.strip_suffix("id") == Some(noun));
+    if named_id
+        || matches!(
+            key.as_str(),
+            "ocid"
+                | "ref"
+                | "reference"
+                | "identifier"
+                | "guid"
+                | "noticenumber"
+                | "idweb"
+                | "publicationnumber"
+                | "referencenumber"
+                | "kenmerk"
+                | "aktenzeichen"
+                | "referencia"
+        )
+        || has(&["expedient", "referentie", "číslozakázky", "numerogara"])
+    {
         Some("id")
     } else if has(&[
         "deadline",
@@ -588,8 +666,19 @@ pub(crate) fn field_for_key(key: &str) -> Option<&'static str> {
         "enddate",
         "datelimite",
         "sluiting",
+        "uiterste",
         "tenderperiod",
         "angebotsfrist",
+        "einreichung",
+        "frist",
+        "termini",
+        "plazo",
+        "fechalimite",
+        "datalimit",
+        "scadenza",
+        "lhůta",
+        "termínpro",
+        "terminskład",
     ]) {
         Some("deadline")
     } else if has(&[
@@ -599,7 +688,15 @@ pub(crate) fn field_for_key(key: &str) -> Option<&'static str> {
         "parution",
         "pubdate",
         "issued",
+        "veröffentlich",
+        "veroffentlich",
         "veroeffentlich",
+        "publicaci",
+        "publicació",
+        "pubblica",
+        "publikac",
+        "zveřejn",
+        "uveřejn",
     ]) {
         Some("publicationDate")
     } else if has(&[
@@ -607,24 +704,63 @@ pub(crate) fn field_for_key(key: &str) -> Option<&'static str> {
         "authority",
         "acheteur",
         "opdrachtgever",
+        "aanbestedende",
         "organization",
         "organisation",
         "contractingbody",
         "purchaser",
         "auftraggeber",
+        "vergabestelle",
+        "òrgan",
+        "organdecontract",
+        "organcontract",
+        "órganodecontrat",
+        "organodecontrat",
+        "poderadjudicador",
+        "entecontraente",
+        "stazioneappaltante",
+        "zadavatel",
+        "zamawiaj",
     ]) {
         Some("buyer")
-    } else if has(&["document", "attachment", "enclosure", "files"]) {
+    } else if has(&[
+        "document",
+        "dokument",
+        "attachment",
+        "enclosure",
+        "files",
+        "unterlagen",
+        "bijlage",
+        "příloh",
+        "allegat",
+        "adjunt",
+    ]) {
         Some("documents")
     } else if has(&["cpv", "classification"]) {
         Some("cpv")
     } else if has(&[
         "title",
+        "titel",
+        "titol",
+        "titulo",
+        "título",
+        "titolo",
+        "tytuł",
+        "název",
+        "nazev",
+        "nazwa",
         "objet",
+        "objeto",
+        "objecte",
+        "oggetto",
         "orderobject",
         "subject",
         "onderwerp",
         "intitule",
+        "intitulé",
+        "betreff",
+        "bezeichnung",
+        "předmět",
     ]) {
         Some("title")
     } else {
@@ -711,6 +847,12 @@ struct HtmlPage {
     ted: Option<(String, usize)>,
     notice_links: usize,
     has_next: bool,
+    /// Field names from table headers, definition terms and labels, in the shared vocabulary.
+    fields: Vec<String>,
+    /// A same-site `<meta http-equiv="refresh">` target.
+    refresh: Option<Url>,
+    /// The page carries GOV.UK publishing platform metadata (`<meta name="govuk:...">`).
+    govuk: bool,
 }
 
 /// Reads an HTML page without holding the parsed document across an await.
@@ -816,7 +958,71 @@ fn inspect_html(base: &Url, body: &str) -> HtmlPage {
     if let Some(first) = ted_notices.first() {
         page.ted = Some((first.to_string(), ted_notices.len()));
     }
+
+    let mut names = BTreeSet::new();
+    for label in document.select(&selector("th, dt, label, caption")) {
+        let text = label.text().collect::<Vec<_>>().join(" ");
+        let text = text.trim();
+        if !text.is_empty() && text.chars().count() <= LABEL_LENGTH {
+            names.extend(field_for_key(text));
+        }
+    }
+    // Repeated notice links carry the notice titles; links to files are documents.
+    if page.notice_links >= 2 {
+        names.insert("title");
+    }
+    if document.select(&selector("a[href]")).any(|anchor| {
+        let href = anchor
+            .value()
+            .attr("href")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let path = href.split(['?', '#']).next().unwrap_or_default();
+        [".pdf", ".zip", ".doc", ".docx", ".xlsx"]
+            .iter()
+            .any(|extension| path.ends_with(extension))
+    }) {
+        names.insert("documents");
+    }
+    page.fields = ordered(names);
+
+    for meta in document.select(&selector("meta[http-equiv][content]")) {
+        let equiv = meta.value().attr("http-equiv").unwrap_or_default();
+        if equiv.eq_ignore_ascii_case("refresh")
+            && let Some(target) = meta.value().attr("content").and_then(refresh_target)
+            && let Some(url) = resolve(base, &target)
+            && related_host(&url, base)
+        {
+            page.refresh = Some(url);
+        }
+    }
+    page.govuk = document.select(&selector("meta[name]")).any(|meta| {
+        meta.value()
+            .attr("name")
+            .is_some_and(|name| name.starts_with("govuk:"))
+    });
     page
+}
+
+/// The URL in a meta refresh `content` such as `0; url='/cms'`.
+fn refresh_target(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let start = lower.find("url=")? + 4;
+    let target = content[start..]
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim();
+    (!target.is_empty()).then(|| target.to_owned())
+}
+
+/// The GOV.UK Content API twin of a GOV.UK page: `/api/content` plus the page path.
+fn govuk_content_api(page: &Url) -> Option<Url> {
+    if page.path().starts_with("/api/") {
+        return None;
+    }
+    let mut url = page.join(&format!("/api/content{}", page.path())).ok()?;
+    url.set_query(None);
+    Some(url)
 }
 
 fn resolve(base: &Url, href: &str) -> Option<Url> {
@@ -1123,10 +1329,22 @@ mod tests {
             ("publicationNumber", "id"),
             ("documents", "documents"),
             ("cpvCode", "cpv"),
+            ("contentId", "id"),
+            ("titol", "title"),
+            ("dataPublicacio", "publicationDate"),
+            ("terminiPresentacioOfertes", "deadline"),
+            ("organContractacio", "buyer"),
+            ("Sluitingsdatum", "deadline"),
+            ("Aanbestedende dienst", "buyer"),
+            ("Datum zveřejnění", "publicationDate"),
+            ("Lhůta pro podání nabídek", "deadline"),
+            ("Název zakázky", "title"),
         ] {
             assert_eq!(field_for_key(key), Some(field), "{key}");
         }
-        assert_eq!(field_for_key("colour"), None);
+        for unrelated in ["colour", "valid", "bid", "paid"] {
+            assert_eq!(field_for_key(unrelated), None, "{unrelated}");
+        }
     }
 
     #[test]
@@ -1203,6 +1421,97 @@ mod tests {
         let requested = source.requested();
         assert!(!requested.iter().any(|url| url.contains("feedback")));
         assert!(!requested.iter().any(|url| url.contains("ted.europa.eu")));
+    }
+
+    #[tokio::test]
+    async fn html_listing_labels_fill_fields_seen() {
+        let start = "https://portal.example/aankondigingen";
+        let html = r#"<html><body><table>
+          <thead><tr><th>Titel</th><th>Aanbestedende dienst</th><th>Publicatiedatum</th>
+            <th>Sluitingsdatum</th></tr></thead>
+          <tr><td><a href="/aankondiging/1">Wegonderhoud</a></td><td>Gemeente</td></tr>
+          <tr><td><a href="/aankondiging/2">Schoolmaaltijden</a></td><td>Provincie</td></tr>
+        </table><a href="/files/bestek.pdf">Bestek</a></body></html>"#;
+        let source = Canned::default().page(start, "text/html", html);
+        let candidates = probe_with(&url(start), &source).await.unwrap();
+        let html = candidates.last().unwrap();
+        assert_eq!(html.method, ConnectionMethod::Html);
+        assert_eq!(
+            html.fields_seen,
+            ["title", "deadline", "buyer", "publicationDate", "documents"]
+        );
+    }
+
+    #[tokio::test]
+    async fn app_shell_reads_the_home_page_for_feeds() {
+        let start = "https://portal.example/aankondigingen/overzicht";
+        let shell = r#"<!doctype html><html><head><base href="/aankondigingen/"></head>
+          <body><app-root></app-root><script src="main.js"></script></body></html>"#;
+        let source = Canned::default()
+            .page(start, "text/html", shell)
+            .page(
+                "https://portal.example/",
+                "text/html",
+                r#"<html><head><meta http-equiv="refresh" content="0; url='/cms" /></head></html>"#,
+            )
+            .page(
+                "https://portal.example/cms",
+                "text/html",
+                r#"<html><body><footer>
+                  <a href="https://portal.example/papi/rss/laatste-publicatie.rss">RSS</a>
+                </footer></body></html>"#,
+            )
+            .page(
+                "https://portal.example/papi/rss/laatste-publicatie.rss",
+                "application/atom+xml",
+                ATOM,
+            );
+        let candidates = probe_with(&url(start), &source).await.unwrap();
+        assert_eq!(
+            methods(&candidates),
+            [ConnectionMethod::Feed, ConnectionMethod::Html]
+        );
+        assert_eq!(candidates[0].found_via, "home page link");
+        assert_eq!(candidates[0].sample_items, 2);
+        assert_eq!(candidates[1].entry_url, start);
+    }
+
+    #[tokio::test]
+    async fn govuk_pages_offer_their_content_api() {
+        let start = "https://www.gov.uk/government/collections/tenders";
+        let html = r#"<html><head><meta name="govuk:format" content="document_collection">
+          </head><body><main><a href="/government/publications/a">A</a></main></body></html>"#;
+        let api = r#"{"title":"Tenders","links":{"organisations":[{"title":"Agency"}],
+          "documents":[
+            {"title":"Crime contract","base_path":"/a","content_id":"1","public_updated_at":"2026-11-16T14:32:46Z"},
+            {"title":"Civil contract","base_path":"/b","content_id":"2","public_updated_at":"2026-10-29T12:07:06Z"}]}}"#;
+        let source = Canned::default().page(start, "text/html", html).page(
+            "https://www.gov.uk/api/content/government/collections/tenders",
+            "application/json",
+            api,
+        );
+        let candidates = probe_with(&url(start), &source).await.unwrap();
+        assert_eq!(
+            methods(&candidates),
+            [ConnectionMethod::Json, ConnectionMethod::Html]
+        );
+        let json = &candidates[0];
+        assert_eq!(json.found_via, "GOV.UK content API");
+        assert_eq!(json.sample_items, 2);
+        assert_eq!(json.fields_seen, ["title", "id"]);
+        assert!(
+            !source
+                .requested()
+                .contains(&"https://www.gov.uk/".to_owned()),
+            "the home page is only read when the start page offers nothing"
+        );
+    }
+
+    #[test]
+    fn meta_refresh_targets_are_read() {
+        assert_eq!(refresh_target("0; url='/cms").as_deref(), Some("/cms"));
+        assert_eq!(refresh_target("5;URL=\"/next\"").as_deref(), Some("/next"));
+        assert_eq!(refresh_target("30"), None);
     }
 
     #[tokio::test]
