@@ -225,6 +225,7 @@ async fn portal_lifecycle_preserves_verified_data_and_serves_document_bytes() {
             model: model.clone(),
             interval: 900,
             recovery: Recovery::default(),
+            concurrency: watchtower::worker::CONCURRENCY,
         }
         .run(stop.clone()),
     );

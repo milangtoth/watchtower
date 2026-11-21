@@ -32,6 +32,13 @@ async fn main() -> Result<()> {
         .context("WATCHTOWER_READ_INTERVAL must be an integer")?
         .unwrap_or(900);
     anyhow::ensure!(interval > 0, "WATCHTOWER_READ_INTERVAL must be positive");
+    let concurrency = std::env::var("WATCHTOWER_CONCURRENCY")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .context("WATCHTOWER_CONCURRENCY must be a positive integer")?
+        .unwrap_or(watchtower::worker::CONCURRENCY);
+    anyhow::ensure!(concurrency > 0, "WATCHTOWER_CONCURRENCY must be positive");
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     let stop = CancellationToken::new();
@@ -43,6 +50,7 @@ async fn main() -> Result<()> {
         fetcher: Fetcher::new(files.clone())?,
         model: Arc::new(OpenAi::new(store.clone())?),
         recovery,
+        concurrency,
     };
     let handle = tokio::spawn(worker.run(stop.clone()));
     let app = api::router(Api {

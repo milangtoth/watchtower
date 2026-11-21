@@ -132,6 +132,7 @@ async fn failed_read_and_its_repair_record_reasons_the_dashboard_shows_together(
             model: Arc::new(Relearner),
             interval: 900,
             recovery: Recovery::default(),
+            concurrency: watchtower::worker::CONCURRENCY,
         }
         .run(stop.clone()),
     );
