@@ -111,7 +111,7 @@ pub fn public_http(url: &Url) -> bool {
 
 impl PortalHttp {
     async fn request(&self, url: Url, phase: &'static str) -> Result<Response, ReadFailure> {
-        self.request_unless_seen(url, phase, None)
+        self.request_unless_seen(url, phase, None, false)
             .await?
             .ok_or_else(|| ReadFailure::Incomplete("Portal URL was already sampled".into()))
     }
@@ -121,8 +121,15 @@ impl PortalHttp {
         mut url: Url,
         phase: &'static str,
         seen: Option<&HashSet<Url>>,
+        stay_on_origin: bool,
     ) -> Result<Option<Response>, ReadFailure> {
+        let origin = url.origin();
         for _ in 0..=5 {
+            if stay_on_origin && url.origin() != origin {
+                return Err(ReadFailure::Incomplete(
+                    "Probe redirect left the advertised origin".into(),
+                ));
+            }
             if !public_http(&url) {
                 return Err(ReadFailure::Incomplete(
                     "Portal URL must be HTTP(S) without credentials".into(),
@@ -175,6 +182,9 @@ impl PortalHttp {
                 return Err(ReadFailure::Blocked("Portal requires a login".into()));
             }
             if status == StatusCode::FORBIDDEN {
+                if stay_on_origin {
+                    return Err(ReadFailure::Incomplete("Portal returned HTTP 403".into()));
+                }
                 let body = read_text(response, "access-denied response body").await?;
                 if let Some(reason) = access_page(&body) {
                     return Err(ReadFailure::Blocked(reason.into()));
@@ -264,13 +274,40 @@ impl PortalHttp {
         })
     }
 
+    /// A small probe sample confined to the requested origin, including redirects.
+    pub(crate) async fn scoped_sample(
+        &self,
+        url: Url,
+        limit: usize,
+        prefix: bool,
+    ) -> Result<Sample, ReadFailure> {
+        let response = self
+            .request_unless_seen(url, "probe headers", None, true)
+            .await?
+            .expect("no visited URLs supplied");
+        let url = response.url().clone();
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_owned);
+        let body = read_limited_text(response, "probe body", limit, limit, prefix).await?;
+        Ok(Sample {
+            url,
+            status,
+            content_type,
+            body,
+        })
+    }
+
     pub(crate) async fn page_unless_seen(
         &self,
         url: Url,
         seen: &HashSet<Url>,
     ) -> Result<Option<Page>, ReadFailure> {
         match self
-            .request_unless_seen(url, "page headers", Some(seen))
+            .request_unless_seen(url, "page headers", Some(seen), false)
             .await?
         {
             Some(response) => Self::read_page(response, "page body").await.map(Some),
@@ -396,7 +433,17 @@ fn set_cookie(header: &str) -> Option<(String, String, bool)> {
     Some((name.to_owned(), value.to_owned(), expired))
 }
 
-async fn read_text(mut response: Response, phase: &'static str) -> Result<String, ReadFailure> {
+async fn read_text(response: Response, phase: &'static str) -> Result<String, ReadFailure> {
+    read_limited_text(response, phase, PAGE_LIMIT, UNPACKED_PAGE_LIMIT, false).await
+}
+
+async fn read_limited_text(
+    mut response: Response,
+    phase: &'static str,
+    limit: usize,
+    unpacked_limit: usize,
+    prefix: bool,
+) -> Result<String, ReadFailure> {
     let mut data = Vec::new();
     let url = response.url().clone();
     while let Some(chunk) = response
@@ -404,7 +451,11 @@ async fn read_text(mut response: Response, phase: &'static str) -> Result<String
         .await
         .map_err(|err| transport_error(&url, phase, err))?
     {
-        if data.len() + chunk.len() > PAGE_LIMIT {
+        if data.len() + chunk.len() > limit {
+            if prefix {
+                data.extend_from_slice(&chunk[..limit - data.len()]);
+                break;
+            }
             return Err(ReadFailure::Incomplete(
                 "Listing or detail page exceeds the page size limit".into(),
             ));
@@ -412,20 +463,20 @@ async fn read_text(mut response: Response, phase: &'static str) -> Result<String
         data.extend_from_slice(&chunk);
     }
     if data.starts_with(&[0x1f, 0x8b]) {
-        data = gunzip(&data)?;
+        data = gunzip(&data, unpacked_limit, prefix)?;
     }
     Ok(String::from_utf8_lossy(&data).into_owned())
 }
 
 /// Unpacks a gzip body such as a compressed sitemap. Unpacked pages may be larger than the
 /// download limit, up to `UNPACKED_PAGE_LIMIT`.
-fn gunzip(data: &[u8]) -> Result<Vec<u8>, ReadFailure> {
+fn gunzip(data: &[u8], limit: usize, prefix: bool) -> Result<Vec<u8>, ReadFailure> {
     let mut unpacked = Vec::new();
     flate2::read::GzDecoder::new(data)
-        .take(UNPACKED_PAGE_LIMIT as u64 + 1)
+        .take(limit as u64 + u64::from(!prefix))
         .read_to_end(&mut unpacked)
         .map_err(|_| ReadFailure::Incomplete("A compressed page could not be unpacked".into()))?;
-    if unpacked.len() > UNPACKED_PAGE_LIMIT {
+    if unpacked.len() > limit {
         return Err(ReadFailure::Incomplete(
             "A compressed page exceeds the unpacked size limit".into(),
         ));
