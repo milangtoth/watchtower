@@ -1,0 +1,3 @@
+# Read-only POST support proposal
+
+We propose adding an optional `request` step to Watchtower’s listing recipe for public portals that use POST to search for tenders. The step would specify an approved HTTPS search URL, the `POST` method, and a JSON body with fields for filters, date ranges, and pagination. GET would remain the default. Once verified, this would let Watchtower read listings from TED, SEAP, KIMDIS, and Doffin. The main risk is that a POST request can change data on a portal. To limit that risk, allow only verified read-only search endpoints and approved fields, reject redirects to unapproved endpoints, and apply the existing per-portal rate limit. Test each recipe with saved sample responses before enabling live requests.
