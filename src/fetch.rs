@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Response, StatusCode, Url, header};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -24,6 +24,9 @@ const FILE_LIMIT: u64 = 250 * 1024 * 1024;
 /// The most bytes one ZIP may expand to, counted as they are decompressed.
 const ARCHIVE_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+/// Session cookies kept per host, and the longest cookie name or value kept.
+const MAX_COOKIES: usize = 20;
+const COOKIE_LENGTH: usize = 4096;
 
 #[derive(Clone)]
 pub struct Fetcher {
@@ -35,6 +38,9 @@ pub struct Fetcher {
 pub struct PortalHttp {
     fetcher: Fetcher,
     portal_host: String,
+    /// Session cookies the portal set during this run, by host. Some portals keep a search's
+    /// filter in the session and page its results through it, so later pages need them.
+    cookies: std::sync::Mutex<HashMap<String, BTreeMap<String, String>>>,
 }
 
 #[derive(Debug)]
@@ -91,6 +97,7 @@ impl Fetcher {
         PortalHttp {
             fetcher: self.clone(),
             portal_host: url.host_str().unwrap_or_default().into(),
+            cookies: Default::default(),
         }
     }
 }
@@ -143,13 +150,15 @@ impl PortalHttp {
                 drop(entries);
                 sleep_until(wait_until).await;
             }
-            let response = self
-                .fetcher
-                .client
-                .get(url.clone())
+            let mut request = self.fetcher.client.get(url.clone());
+            if let Some(cookie) = self.cookie_header(&host) {
+                request = request.header(header::COOKIE, cookie);
+            }
+            let response = request
                 .send()
                 .await
                 .map_err(|err| transport_error(&url, phase, err))?;
+            self.keep_cookies(&host, &response);
             let status = response.status();
             if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
                 url = response
@@ -203,6 +212,34 @@ impl PortalHttp {
         Err(ReadFailure::Incomplete(
             "Portal redirected too many times".into(),
         ))
+    }
+
+    /// The `Cookie` header for `host`: the cookies it set earlier in this run.
+    fn cookie_header(&self, host: &str) -> Option<String> {
+        let cookies = self.cookies.lock().expect("cookie lock");
+        let jar = cookies.get(host).filter(|jar| !jar.is_empty())?;
+        Some(
+            jar.iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+
+    /// Keeps the cookies a response sets, for later requests to the same host in this run.
+    fn keep_cookies(&self, host: &str, response: &Response) {
+        let mut cookies = self.cookies.lock().expect("cookie lock");
+        for header in response.headers().get_all(header::SET_COOKIE) {
+            let Some((name, value, expired)) = header.to_str().ok().and_then(set_cookie) else {
+                continue;
+            };
+            let jar = cookies.entry(host.to_owned()).or_default();
+            if expired {
+                jar.remove(&name);
+            } else if jar.len() < MAX_COOKIES || jar.contains_key(&name) {
+                jar.insert(name, value);
+            }
+        }
     }
 
     pub async fn page(&self, url: Url) -> Result<Page, ReadFailure> {
@@ -332,6 +369,31 @@ impl PortalHttp {
         })
         .map_err(file_error)
     }
+}
+
+/// Name, value and whether it was deleted, from a `Set-Cookie` header such as
+/// `JSESSIONID=abc; Path=/; HttpOnly`. Attributes other than an expiry are ignored: cookies are
+/// only sent back to the host that set them, within one run.
+fn set_cookie(header: &str) -> Option<(String, String, bool)> {
+    let mut parts = header.split(';');
+    let (name, value) = parts.next()?.split_once('=')?;
+    let (name, value) = (name.trim(), value.trim().trim_matches('"'));
+    let valid = |text: &str| {
+        text.len() <= COOKIE_LENGTH
+            && text
+                .chars()
+                .all(|c| c.is_ascii_graphic() && !matches!(c, ';' | ',' | '"' | '\\'))
+    };
+    if name.is_empty() || !valid(name) || !valid(value) {
+        return None;
+    }
+    let expired = value.is_empty()
+        || parts.any(|attribute| {
+            attribute.split_once('=').is_some_and(|(key, value)| {
+                key.trim().eq_ignore_ascii_case("max-age") && value.trim().starts_with(['0', '-'])
+            })
+        });
+    Some((name.to_owned(), value.to_owned(), expired))
 }
 
 async fn read_text(mut response: Response, phase: &'static str) -> Result<String, ReadFailure> {
@@ -956,5 +1018,33 @@ mod unpack_tests {
         assert_eq!(size_label(FILE_LIMIT), "250 MB");
         assert_eq!(size_label(ARCHIVE_LIMIT), "1024 MB");
         assert_eq!(size_label(150), "150-byte");
+    }
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::set_cookie;
+
+    #[test]
+    fn set_cookie_headers_keep_name_and_value_and_notice_deletion() {
+        assert_eq!(
+            set_cookie("JSESSIONID=s_Kdv.psat02; Path=/Satellite; Secure; HttpOnly"),
+            Some(("JSESSIONID".into(), "s_Kdv.psat02".into(), false))
+        );
+        assert_eq!(
+            set_cookie(r#"lang="de"; Max-Age=3600"#),
+            Some(("lang".into(), "de".into(), false))
+        );
+        assert_eq!(
+            set_cookie("lang=de; Max-Age=0"),
+            Some(("lang".into(), "de".into(), true))
+        );
+        assert_eq!(
+            set_cookie("lang=; Path=/"),
+            Some(("lang".into(), String::new(), true))
+        );
+        for invalid in ["no-equals-sign", "=value", "a b=c", "name=va\"lue x"] {
+            assert_eq!(set_cookie(invalid), None, "{invalid}");
+        }
     }
 }

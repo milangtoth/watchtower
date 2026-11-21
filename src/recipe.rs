@@ -495,7 +495,7 @@ pub async fn read(
         }
         if seen_pages.len() > LISTING_PAGE_LIMIT {
             return Err(ReadFailure::Incomplete(format!(
-                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders"
+                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders, such as a status filter or a search form filter link"
             )));
         }
         listing_pages.push(url.to_string());
@@ -528,6 +528,9 @@ pub async fn read(
                 ));
             }
             total = Some(count);
+        }
+        if listing_pages.len() == 1 {
+            too_many_pages(&listing, recipe)?;
         }
         empty_state |= listing.empty_state;
         listing_links.extend(listing.links.all);
@@ -653,6 +656,64 @@ pub async fn read(
             windowed,
         },
     })
+}
+
+/// Fails on the first page when it already shows the listing has more pages than the reader
+/// reads: a total that needs them at this page size, or a numbered link to a later last page.
+fn too_many_pages(listing: &ListingPage, recipe: &Recipe) -> Result<(), ReadFailure> {
+    let rows = listing.rows.len();
+    let pages = listing
+        .total
+        .filter(|_| rows > 0)
+        .map(|total| total.div_ceil(rows))
+        .into_iter()
+        .chain(
+            recipe
+                .page_parameter
+                .is_none()
+                .then(|| listing.next.first())
+                .flatten()
+                .and_then(|next| last_linked_page(next, &listing.links.all)),
+        )
+        .max();
+    match pages {
+        Some(pages) if pages > LISTING_PAGE_LIMIT => Err(ReadFailure::Incomplete(format!(
+            "The listing has {pages} pages, more than {LISTING_PAGE_LIMIT}; use a listing limited to open tenders, such as a status filter or a search form filter link"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The highest page number among links that differ from the first page's `next` link only in
+/// its page number, such as a "last page" link. Only a next link numbered 1 or 2 counts, so an
+/// offset parameter is never read as a page number.
+fn last_linked_page(next: &Url, links: &HashSet<String>) -> Option<usize> {
+    let pairs: Vec<(String, String)> = next.query_pairs().into_owned().collect();
+    let links: Vec<Url> = links
+        .iter()
+        .filter_map(|link| Url::parse(link).ok())
+        .filter(|link| link.path() == next.path())
+        .collect();
+    pairs
+        .iter()
+        .filter(|(_, value)| matches!(value.parse::<usize>(), Ok(1 | 2)))
+        .filter_map(|(key, _)| {
+            links
+                .iter()
+                .filter_map(|link| {
+                    let other: Vec<(String, String)> = link.query_pairs().into_owned().collect();
+                    let same_others = other.len() == pairs.len()
+                        && pairs.iter().zip(&other).all(|(mine, theirs)| {
+                            mine.0 == theirs.0 && (mine.0 == *key || mine.1 == theirs.1)
+                        });
+                    same_others
+                        .then(|| other.iter().find(|(name, _)| name == key))
+                        .flatten()
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                })
+                .max()
+        })
+        .max()
 }
 
 fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
@@ -1606,6 +1667,11 @@ fn resolve_many(node: &Node<'_>, select: Option<&Select>, base: &Url) -> Result<
 }
 
 fn resolve(base: &Url, value: &str) -> Result<Url> {
+    let value = match script_url(value) {
+        Some(Ok(url)) => url,
+        Some(Err(())) => anyhow::bail!("portal link is a script call without a URL"),
+        None => value,
+    };
     let mut url = base
         .join(value)
         .context("could not resolve a portal link")?;
@@ -1615,6 +1681,40 @@ fn resolve(base: &Url, value: &str) -> Result<Url> {
     );
     url.set_fragment(None);
     Ok(url)
+}
+
+/// The URL inside a JavaScript link handler, such as `submitTo('/search?page=2')` in an
+/// `onclick` attribute or a `javascript:` href. `None` when `value` is not a script call; an
+/// error when it is one without a quoted URL, such as `javascript:void(0)`.
+fn script_url(value: &str) -> Option<Result<&str, ()>> {
+    let value = value.trim();
+    let script = value
+        .get(..11)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("javascript:"))
+        || value.split_once('(').is_some_and(|(callee, arguments)| {
+            // A call ends its statement, unlike the brackets in a name like `file(1).pdf`.
+            arguments
+                .split_once(')')
+                .is_some_and(|(_, after)| after.trim().is_empty() || after.trim().starts_with(';'))
+                && !callee.is_empty()
+                && callee
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.'))
+        });
+    if !script {
+        return None;
+    }
+    let url = value
+        .split(['\'', '"'])
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .find(|quoted| {
+            quoted.starts_with(['/', '?', '.'])
+                || quoted.starts_with("http://")
+                || quoted.starts_with("https://")
+        });
+    Some(url.ok_or(()))
 }
 
 fn resolve_field_url(fields: &mut Fields, base: &Url) {
@@ -1681,6 +1781,11 @@ pub(crate) fn sample_page(page: &Page, limit: usize) -> PageSample {
             }
         }
         let content = main_content(&document);
+        // Filter options of search forms come first, so a long page of links cannot crowd out
+        // the way to a listing limited to open tenders.
+        for (url, label) in form_filters(content, &page.url) {
+            add_link(url.as_str(), label);
+        }
         let anchors = Selector::parse("a[href]").unwrap();
         for anchor in content.select(&anchors) {
             if let Some(href) = anchor
@@ -1699,6 +1804,79 @@ pub(crate) fn sample_page(page: &Page, limit: usize) -> PageSample {
         sample(&content.html(), limit)
     };
     PageSample { body, links }
+}
+
+/// Search form filter options as links: the form's action with one checkbox, radio or select
+/// option added to its query, labelled "Search form filter: <option label>". Same-origin forms
+/// only. The portal may still ignore a GET, so the link is a lead to sample, not a promise.
+fn form_filters(content: ElementRef<'_>, base: &Url) -> Vec<(Url, String)> {
+    const FILTER_LIMIT: usize = 12;
+    let forms = Selector::parse("form[action]").unwrap();
+    let options =
+        Selector::parse("input[type=checkbox][name][value], input[type=radio][name][value], select[name] option[value]")
+            .unwrap();
+    let labels = Selector::parse("label[for]").unwrap();
+    let text = |element: ElementRef<'_>| {
+        element
+            .text()
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut filters = Vec::new();
+    for form in content.select(&forms) {
+        let Some(action) = form
+            .value()
+            .attr("action")
+            .and_then(|action| base.join(action.trim()).ok())
+            .filter(|action| action.origin() == base.origin())
+        else {
+            continue;
+        };
+        for option in form.select(&options) {
+            let element = option.value();
+            let (name, value, label) = if element.name() == "option" {
+                let Some(select) = option
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .find(|parent| parent.value().name() == "select")
+                else {
+                    continue;
+                };
+                (
+                    select.value().attr("name").unwrap_or_default(),
+                    element.attr("value").unwrap_or_default(),
+                    text(option),
+                )
+            } else {
+                let label = element
+                    .attr("id")
+                    .and_then(|id| {
+                        form.select(&labels)
+                            .find(|label| label.value().attr("for") == Some(id))
+                    })
+                    .map(text)
+                    .or_else(|| element.attr("title").map(str::to_owned))
+                    .unwrap_or_default();
+                (
+                    element.attr("name").unwrap_or_default(),
+                    element.attr("value").unwrap_or_default(),
+                    label,
+                )
+            };
+            if name.is_empty() || value.trim().is_empty() {
+                continue;
+            }
+            let mut url = action.clone();
+            url.query_pairs_mut().append_pair(name, value);
+            let label = if label.is_empty() { value } else { &label };
+            filters.push((url, format!("Search form filter: {label}")));
+            if filters.len() == FILTER_LIMIT {
+                return filters;
+            }
+        }
+    }
+    filters
 }
 
 fn main_content(document: &Html) -> ElementRef<'_> {
@@ -2406,5 +2584,111 @@ mod sample_tests {
             stated("Stichting Openbaar Onderwijs".into()).as_deref(),
             Some("Stichting Openbaar Onderwijs")
         );
+    }
+}
+
+#[cfg(test)]
+mod listing_route_tests {
+    use super::*;
+
+    #[test]
+    fn links_inside_javascript_handlers_resolve_to_their_quoted_url() {
+        let base = Url::parse("https://portal.example/app/welcome.do").unwrap();
+        for (value, expected) in [
+            (
+                "setTargetAndSubmit('/app/search.do?method=showTable&page=2')",
+                "https://portal.example/app/search.do?method=showTable&page=2",
+            ),
+            (
+                r#"javascript:go("?page=3");"#,
+                "https://portal.example/app/welcome.do?page=3",
+            ),
+            (
+                "window.location.assign('https://portal.example/list?page=4'); return false;",
+                "https://portal.example/list?page=4",
+            ),
+            // Plain links, including ones with brackets in a file name, are unchanged.
+            ("file(1).pdf", "https://portal.example/app/file(1).pdf"),
+            ("/list?page=2", "https://portal.example/list?page=2"),
+        ] {
+            assert_eq!(resolve(&base, value).unwrap().as_str(), expected, "{value}");
+        }
+        for value in ["javascript:void(0);", "toggle('menu')"] {
+            let error = resolve(&base, value).unwrap_err().to_string();
+            assert!(
+                error.contains("script call without a URL"),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_form_options_are_offered_as_filter_links_before_other_links() {
+        let mut body = String::from(
+            r#"<html><body><main>
+            <form name="search" method="post" action="/app/overview.do?method=searchExtended">
+              <input type="text" name="searchText" value="">
+              <input type="checkbox" id="all" name="allTypes" checked>
+              <input type="checkbox" name="types" value="Tender" id="typeTender" title="Tender">
+              <label for="typeTender">Call for tenders</label>
+              <input type="checkbox" name="types" value="Awarded" title="Awarded contract">
+              <select name="sort"><option value="">Any</option><option value="date">Newest</option></select>
+              <input type="submit" value="Search">
+            </form>
+            <form action="https://elsewhere.example/search"><input type="radio" name="x" value="1"></form>"#,
+        );
+        for index in 0..60 {
+            body += &format!(r#"<a href="/app/category/{index}">Category {index}</a>"#);
+        }
+        body += "</main></body></html>";
+        let page = Page {
+            url: Url::parse("https://portal.example/app/overview.do?method=show").unwrap(),
+            body,
+        };
+        let links = sample_page(&page, 20_000).links;
+        let filters: Vec<_> = links
+            .iter()
+            .take(3)
+            .map(|link| (link.label.as_str(), link.url.as_str()))
+            .collect();
+        assert_eq!(
+            filters,
+            [
+                (
+                    "Search form filter: Call for tenders",
+                    "https://portal.example/app/overview.do?method=searchExtended&types=Tender"
+                ),
+                (
+                    "Search form filter: Awarded contract",
+                    "https://portal.example/app/overview.do?method=searchExtended&types=Awarded"
+                ),
+                (
+                    "Search form filter: Newest",
+                    "https://portal.example/app/overview.do?method=searchExtended&sort=date"
+                ),
+            ]
+        );
+        assert!(links[3].label.starts_with("Category"));
+        assert!(!links.iter().any(|link| link.url.contains("elsewhere")));
+    }
+
+    #[test]
+    fn last_linked_page_reads_page_numbers_but_not_offsets_or_other_links() {
+        let next = Url::parse("https://p.example/t?method=show&page=2").unwrap();
+        let links: HashSet<String> = [
+            "https://p.example/t?method=show&page=338",
+            "https://p.example/t?method=sort&page=900",
+            "https://p.example/other?method=show&page=999",
+            "https://p.example/t?method=show&page=17",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(last_linked_page(&next, &links), Some(338));
+        let offset = Url::parse("https://p.example/t?method=show&offset=20").unwrap();
+        let links: HashSet<String> = ["https://p.example/t?method=show&offset=6740".to_owned()]
+            .into_iter()
+            .collect();
+        assert_eq!(last_linked_page(&offset, &links), None);
     }
 }
