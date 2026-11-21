@@ -92,6 +92,10 @@ pub struct Recipe {
     /// stops at an empty page or once the listing total is reached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_parameter: Option<String>,
+    /// Portal wording for the buyer's label on detail pages, such as "from", read from a
+    /// definition list when no detail field selects the buyer. Lowercase, without a colon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buyer_labels: Vec<String>,
 }
 
 /// Reads `items` as a plain path. Models sometimes write it like the other selections, as
@@ -279,6 +283,12 @@ impl Recipe {
                 tender_format
             };
             validate_path(format, &rule.path).context("documents")?;
+        }
+        for label in &self.buyer_labels {
+            ensure!(
+                !label.trim().is_empty() && label == &label.to_lowercase(),
+                "buyer_labels are lowercase labels such as \"from\""
+            );
         }
         if let Some(timezone) = &self.timezone {
             ensure!(timezone.parse::<Tz>().is_ok(), "invalid IANA timezone");
@@ -1046,9 +1056,8 @@ fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
     resolve_field_url(&mut fields, &page.url);
     if let Source::Html(document) = &source {
         let content = main_content(document);
-        let gov_uk = page.url.host_str() == Some("www.gov.uk");
         if !fields.contains_key("buyerName")
-            && let Some(buyer) = metadata::buyer(content, gov_uk)
+            && let Some(buyer) = metadata::buyer(content, &recipe.buyer_labels)
         {
             fields.insert("buyerName".into(), vec![buyer]);
         }
@@ -1057,11 +1066,12 @@ fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
         {
             fields.insert("publicationDate".into(), vec![date.to_string()]);
         }
+        // The learned timezone first, otherwise the timezone of the portal's country domain.
         let timezone = recipe
             .timezone
             .as_deref()
             .and_then(|name| name.parse().ok())
-            .or_else(|| gov_uk.then_some(chrono_tz::Europe::London));
+            .or_else(|| page.url.host_str().and_then(metadata::country_timezone));
         if fields
             .get("submissionDeadline")
             .and_then(|values| values.first())
@@ -1119,6 +1129,22 @@ fn find_documents(node: &Node<'_>, recipe: &Recipe, base: &Url) -> Result<Attach
         fallback: false,
         scope: None,
     })
+}
+
+/// Whether a page at `depth` belongs to the tender: depth 0 is the tender's own page and depth 1
+/// a page linked from it, such as an HTML attachment. Pages the fallback finds further away
+/// belong to other publications (for example a standard contract set linked from a guidance
+/// page), so their files are not the tender's documents. Pages the recipe selects were learned
+/// on this portal and are followed to any depth.
+fn own_section(source: LinkSource, depth: usize) -> bool {
+    source == LinkSource::Recipe || depth <= 1
+}
+
+fn skip_foreign_page(url: &Url) {
+    tracing::info!(
+        location = %location(url),
+        "Skipping a page outside the tender's own section"
+    );
 }
 
 /// How an attachment link was found. Recipe selectors were learned on the portal's own tender
@@ -1230,6 +1256,10 @@ async fn attachment_files(
                     if page.url != link.url && visited.contains(&page.url) {
                         continue;
                     }
+                    if !own_section(link.source, link.depth + 1) {
+                        skip_foreign_page(&page.url);
+                        continue;
+                    }
                     (page, link.depth + 1)
                 }
             }
@@ -1266,17 +1296,27 @@ async fn attachment_files(
             }
             Err(error) => return Err(incomplete(error)),
         };
-        linked_pages += 1;
-        page_files.extend(more.files.iter().cloned());
+        // Only the recipe's own attachment pages must lead to files; a page the fallback guessed
+        // may legitimately point elsewhere.
+        if source == LinkSource::Recipe {
+            linked_pages += 1;
+            page_files.extend(more.files.iter().cloned());
+        }
         let here = Some(page.url.clone());
         files.extend(queue(more.files, depth, source, &here, None));
-        pages.extend(queue(
-            more.pages,
-            depth + 1,
-            source,
-            &here,
-            more.scope.as_deref(),
-        ));
+        if own_section(source, depth + 1) {
+            pages.extend(queue(
+                more.pages,
+                depth + 1,
+                source,
+                &here,
+                more.scope.as_deref(),
+            ));
+        } else {
+            for url in &more.pages {
+                skip_foreign_page(url);
+            }
+        }
         if samples.len() < 5 {
             samples.push(sample_page(&page, 16_000).body);
         }

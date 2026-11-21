@@ -54,7 +54,13 @@ pub struct Worker {
     /// Seconds between regular reads of a portal.
     pub interval: i64,
     pub recovery: Recovery,
+    /// Portals worked on at once. Each portal keeps its own one-request-per-second limit, so
+    /// this only bounds total load, not the load on any one portal.
+    pub concurrency: usize,
 }
+
+/// Default for `Worker::concurrency`.
+pub const CONCURRENCY: usize = 32;
 
 /// How a portal recovers from failures without a person. All durations are in seconds.
 #[derive(Clone, Debug)]
@@ -107,7 +113,7 @@ impl Worker {
                 tracing::error!(%error, "Could not enqueue scheduled reads");
                 continue;
             }
-            while running.len() < 4 && !stop.is_cancelled() {
+            while running.len() < self.concurrency.max(1) && !stop.is_cancelled() {
                 let job = match self.store.claim().await {
                     Ok(Some(job)) => job,
                     Ok(None) => break,
