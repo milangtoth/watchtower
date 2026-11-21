@@ -205,6 +205,80 @@ fn endpoint(literal: &str, base: &Url, page: &Url) -> Option<(Url, u8)> {
     Some((url, 4 * u8::from(notice) + 2 * u8::from(search)))
 }
 
+/// Substitute `${Name}` placeholders bound to short string constants (`Name="search"`) and
+/// report whether the result is a search or listing path. Unresolved placeholders never match.
+fn post_search_path(literal: &str, js: &str) -> bool {
+    let mut path = String::new();
+    let mut rest = literal;
+    while let Some(open) = rest.find("${") {
+        path.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            return false;
+        };
+        let name = &rest[open + 2..open + close];
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        {
+            return false;
+        }
+        let Some(value) = constant(js, name) else {
+            return false;
+        };
+        path.push_str(value);
+        rest = &rest[open + close + 1..];
+    }
+    path.push_str(rest);
+    let lower = path.split('?').next().unwrap_or("").to_ascii_lowercase();
+    lower.starts_with('/')
+        && (lower.contains("search") || NOTICE_WORDS.iter().any(|s| lower.contains(s)))
+}
+
+/// Find `.post(<literal>` call sites directly. The literal scanner below can lose its place
+/// in minified bundles (quotes inside templates and regexes), which hid Doffin's search.
+fn post_calls(js: &str, base: &Url, page: &Url) -> bool {
+    js.match_indices(".post(").any(|(at, call)| {
+        let rest = js[at + call.len()..].trim_start();
+        let Some(quote) = rest
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '\'' | '"' | '`'))
+        else {
+            return false;
+        };
+        let Some(end) = rest[1..].find([quote, '\n']) else {
+            return false;
+        };
+        let literal = &rest[1..=end];
+        literal.len() <= 2048
+            && rest[1 + end..].starts_with(quote)
+            && (endpoint(literal, base, page).is_some() || post_search_path(literal, js))
+    })
+}
+
+fn constant<'a>(js: &'a str, name: &str) -> Option<&'a str> {
+    let pattern = format!("{name}=");
+    js.match_indices(&pattern).find_map(|(at, _)| {
+        let prior = js[..at].chars().next_back()?;
+        if !matches!(prior, ',' | ';' | ' ' | '\n' | '(' | '{') {
+            return None;
+        }
+        let tail = &js[at + pattern.len()..];
+        let quote = tail
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '\'' | '"' | '`'))?;
+        let end = tail[1..].find(quote)?;
+        let value = &tail[1..=end];
+        (value.len() <= 64
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')))
+        .then_some(value)
+    })
+}
+
 #[derive(Default)]
 pub(super) struct Routes {
     get: BTreeSet<(Reverse<u8>, Url)>,
@@ -215,6 +289,7 @@ impl Routes {
     /// Read literal URL strings only. A bounded window around the literal distinguishes
     /// explicit POST searches from GET requests without evaluating the site's program.
     pub(super) fn inspect(&mut self, js: &str, base: &Url, page: &Url) {
+        self.post_search |= post_calls(js, base, page);
         let bytes = js.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
@@ -244,9 +319,10 @@ impl Routes {
             }
             let literal = &js[start + 1..i];
             i += 1;
-            let Some((url, score)) = endpoint(literal, base, page) else {
+            let endpoint = endpoint(literal, base, page);
+            if endpoint.is_none() && !(literal.starts_with('/') || literal.starts_with("${")) {
                 continue;
-            };
+            }
             let before = &js[js.ceil_char_boundary(start.saturating_sub(48))..start];
             let after = &js[i..js.floor_char_boundary((i + 180).min(js.len()))];
             let before = before
@@ -268,9 +344,14 @@ impl Routes {
                 .flat_map(char::to_lowercase)
                 .collect();
             if before.ends_with(".post") || options.contains("method:post") {
-                self.post_search = true;
+                // A templated path such as `/${route}` counts when each placeholder names a
+                // string constant in the same bundle and the resolved path is a search.
+                self.post_search |= endpoint.is_some() || post_search_path(literal, js);
                 continue;
             }
+            let Some((url, score)) = endpoint else {
+                continue;
+            };
             if [".delete", ".put", ".patch"]
                 .iter()
                 .any(|m| before.ends_with(m))
@@ -324,6 +405,26 @@ mod tests {
                 "https://www.portal.example/graphql?query=%7Bnotices%7Bid%7D%7D"
             ]
         );
+    }
+
+    #[test]
+    fn templated_posts_count_only_when_they_resolve_to_a_search_path() {
+        let page = Url::parse("https://portal.example/").unwrap();
+        let flags = |js: &str| {
+            let mut routes = Routes::default();
+            routes.inspect(js, &page, &page);
+            routes.post_search
+        };
+        assert!(flags("var Id=`search`;api.post(`/${Id}`,body)"));
+        assert!(flags(
+            r#"const n="notices";fetch(`/v2/${n}`,{method:"POST"})"#
+        ));
+        assert!(!flags("api.post(`/${route}`,body)"));
+        assert!(!flags("var L=`login`;api.post(`/${L}`,body)"));
+        assert!(!flags(
+            r#"fetch("/Login/CheckSecurityCode",{method:"POST"})"#
+        ));
+        assert!(!flags("var Id=`search`;api.get(`/${Id}`)"));
     }
 
     #[test]

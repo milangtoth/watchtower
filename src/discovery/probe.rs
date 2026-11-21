@@ -2185,6 +2185,50 @@ mod tests {
             );
         }
 
+        /// Mirrors Doffin: an axios instance posts to a path built from a named string constant.
+        #[tokio::test]
+        async fn templated_post_search_reports_the_unsupported_method() {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = calls.clone();
+            let router = Router::new()
+                .route(
+                    "/search",
+                    get(|| async {
+                        axum::response::Html(
+                            r#"<div id="root"></div><script type="module" src="/assets/index.js"></script>"#,
+                        )
+                    }),
+                )
+                .route(
+                    "/assets/index.js",
+                    get(|| async {
+                        (
+                            [(header::CONTENT_TYPE, "application/javascript")],
+                            // The regex's lone quote desynchronises the literal scanner.
+                            "var Id=`search`,Rd=`suggest`,Sf=Td.create({baseURL:jd});\
+                             var q=s.replace(/'/g,``);\
+                             var r_=async()=>await Sf.post(`/${Id}`,uh(e)).then(e=>e.data);",
+                        )
+                    }),
+                )
+                .layer(axum::middleware::from_fn(
+                    move |req: axum::extract::Request, next: axum::middleware::Next| {
+                        seen.lock().unwrap().push(req.method().clone());
+                        async move { next.run(req).await }
+                    },
+                ));
+            let base = serve(router).await;
+            let start = Url::parse(&format!("{base}/search")).unwrap();
+            let files = tempfile::tempdir().unwrap();
+            let http = Fetcher::new(files.path().into()).unwrap().portal(&start);
+            let error = probe(&start, &http).await.unwrap_err();
+            assert!(
+                error.to_string().contains("POST search is unsupported"),
+                "{error}"
+            );
+            assert!(calls.lock().unwrap().iter().all(|m| m == "GET"));
+        }
+
         #[tokio::test]
         async fn scoped_samples_bound_bodies_and_stop_cross_origin_redirects() {
             use axum::response::Redirect;
