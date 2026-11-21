@@ -375,19 +375,100 @@ fn filename(response: &Response) -> String {
     let header_name = response
         .headers()
         .get(header::CONTENT_DISPOSITION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').skip(1).map(str::trim).find_map(|part| {
-                part.strip_prefix("filename=")
-                    .map(|value| value.trim_matches('"'))
-            })
-        });
+        .and_then(|value| disposition_filename(value.as_bytes()));
     header_name
+        .as_deref()
         .or_else(|| response.url().path_segments().and_then(Iterator::last))
         .and_then(|name| name.rsplit(['/', '\\']).next())
+        .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or("document")
         .to_owned()
+}
+
+/// The file name in a `Content-Disposition` header. An RFC 8187 `filename*` wins over a plain
+/// `filename`. Parameter names are case-insensitive, quoted values may contain `;`, and a raw
+/// UTF-8 name, which some portals send, is read as UTF-8.
+fn disposition_filename(header: &[u8]) -> Option<String> {
+    let header = String::from_utf8_lossy(header);
+    let mut plain = None;
+    let mut extended = None;
+    for parameter in disposition_parameters(&header).into_iter().skip(1) {
+        let Some((name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "filename*" if extended.is_none() => extended = extended_value(value),
+            "filename" if plain.is_none() => plain = Some(unquote(value)),
+            _ => {}
+        }
+    }
+    extended.or(plain).filter(|name| !name.trim().is_empty())
+}
+
+/// Splits a header at semicolons outside quoted strings.
+fn disposition_parameters(header: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+    for (index, ch) in header.char_indices() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                parts.push(&header[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&header[start..]);
+    parts
+}
+
+fn unquote(value: &str) -> String {
+    match value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        Some(inner) => {
+            let mut text = String::with_capacity(inner.len());
+            let mut chars = inner.chars();
+            while let Some(ch) = chars.next() {
+                text.push(if ch == '\\' {
+                    chars.next().unwrap_or(ch)
+                } else {
+                    ch
+                });
+            }
+            text
+        }
+        None => value.trim_matches('"').to_owned(),
+    }
+}
+
+/// Decodes an RFC 8187 value such as `UTF-8''Zad%C3%A1vac%C3%AD.pdf`.
+fn extended_value(value: &str) -> Option<String> {
+    let value = value.trim_matches('"');
+    let mut parts = value.splitn(3, '\'');
+    let (charset, _language, encoded) = (parts.next()?, parts.next()?, parts.next()?);
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut input = encoded.bytes();
+    while let Some(byte) = input.next() {
+        if byte == b'%' {
+            let digits = [input.next()?, input.next()?];
+            let hex = std::str::from_utf8(&digits).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    Some(if charset.eq_ignore_ascii_case("iso-8859-1") {
+        bytes.iter().map(|&byte| char::from(byte)).collect()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 fn access_path(url: &Url) -> bool {
@@ -660,6 +741,25 @@ mod transport_tests {
             "{reason}"
         );
         assert!(!reason.contains("test-secret"));
+    }
+
+    #[test]
+    fn content_disposition_names_prefer_the_encoded_form() {
+        for (header, expected) in [
+            (
+                &b"attachment; filename=\"Zad?vac?.pdf\"; filename*=UTF-8''Zad%C3%A1vac%C3%AD%20dokumentace.pdf"[..],
+                Some("Zadávací dokumentace.pdf"),
+            ),
+            (b"attachment;filename=\"priloha_1.docx\"", Some("priloha_1.docx")),
+            (b"inline; FILENAME=plan.pdf", Some("plan.pdf")),
+            (b"attachment; filename=\"a;b \\\"c\\\".pdf\"", Some("a;b \"c\".pdf")),
+            (b"attachment; filename*=iso-8859-1'cs'Smlouva%E1.pdf", Some("Smlouvaá.pdf")),
+            ("attachment; filename=\"Výkaz výměr.xlsx\"".as_bytes(), Some("Výkaz výměr.xlsx")),
+            (b"attachment", None),
+            (b"attachment; filename=\"\"", None),
+        ] {
+            assert_eq!(disposition_filename(header).as_deref(), expected, "{header:?}");
+        }
     }
 
     #[test]
