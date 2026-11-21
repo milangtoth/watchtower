@@ -44,6 +44,17 @@ portals:
     readiness: five-public-downloads-verified
     note: The marketing pages repeated eight featured notices. The public Satellite table returned two distinct pages, with notice type, buyer, publication date, deadline and project links. The separate source baseline verifies five downloads.
     evidence: dtvp-baseline.json
+    open_listing_route: >-
+      Checked 2026-11-21 with spaced read-only requests. The welcome table mixes every notice type
+      (338 pages, 6751 entries; its next and last links are plain hrefs). The "Alle Bekanntmachungen"
+      page has a public search form (POST to categoryOverview.do?method=searchExtended) with a
+      publication type checkbox selectedPublicationTypes=Tender. The same filter works as a GET:
+      /Satellite/company/announcements/categoryOverview.do?method=searchExtended&selectedPublicationTypes=Tender
+      shows "Seite 1 von 124 - Gesamteinträge 2478", calls for tenders only. Its next and last links
+      sit in onclick="setTargetAndSubmit('/Satellite/common/project/search.do?method=showTable&fromSearch=1&selectedTablePagePROJECT_RESULT=2')"
+      and page through the session: with the JSESSIONID cookie page 2 shows new rows; adding the
+      page parameter to the GET search instead repeats page 1's rows. No page size control or feed
+      is exposed.
 
   - name: Ireland eTenders
     url: https://www.etenders.gov.ie/epps/prepareCurrentOpportunities.do?currentType=cft
@@ -56,7 +67,7 @@ portals:
     best_method: html
     entry_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?searchType=cftFTS&latest=true
     readiness: five-public-downloads-verified
-    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option.
+    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option. Rechecked 2026-11-21 from a normal connection, so the live run's CAPTCHA failure is not a real block. Listing pages 1-3 each returned 10 notices and a detail page loaded, all without a CAPTCHA. The only "captcha" on the listing is an empty hidden form field (input name="captcha"), which a model check can mistake for a challenge.
     evidence: etenders-ie-baseline.json
     samples: IE.json
 
@@ -108,6 +119,8 @@ portals:
     expect: failed
     readiness: blocked-verified
     expected_blocker: CAPTCHA required by the search form
+    alternative_url: https://etendersni.gov.uk/epps/quickSearchAction.do?searchType=cftFTS&latest=true
+    note: Rechecked 2026-11-21 from a normal connection (no VPN). This URL is a simple-search form with a CAPTCHA image (/epps/genCaptcha) and no results, so the block is real here. Unlike Ireland's identical URL, it does not redirect to a listing. The same ePPS latest-opportunities listing at alternative_url is public, paginated and links detail pages with documents, all without a CAPTCHA. Decide whether this stays a blocked case.
 
   - name: Central Bedfordshire In-tend
     url: https://in-tendhost.co.uk/centralbedfordshire/aspx/Tenders/Current
@@ -130,7 +143,7 @@ portals:
     best_method: ocds
     entry_url: https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=25
     readiness: needs-five-download-baseline
-    note: Two cursor pages returned 25 distinct releases each. All 25 first-page releases carried deadlines and 12 carried document links.
+    note: Two cursor pages returned 25 distinct releases each. All 25 first-page releases carried deadlines and 12 carried document links. On 2026-11-21, from a normal connection, /Search, /Search/Results and the OCDS API all returned HTTP 200 to Watchtower's user agent. The live run's HTTP 403 did not reproduce, so it is treated as a VPN artefact. The footer's "Data and API" link leads to the API documentation.
     evidence: https://www.gov.uk/government/publications/open-contracting
 
   - name: Berlin public procurement
@@ -157,6 +170,11 @@ portals:
     entry_url: https://vergabe.niedersachsen.de/Satellite/company/welcome.do
     readiness: needs-five-download-baseline
     note: Two distinct public result pages expose the notice title, buyer, publication date, bid deadline and project links.
+    open_listing_route: >-
+      Checked 2026-11-21. Same software as DTVP. The welcome table has 101 pages (2020 entries, all
+      notice types). The GET search filter
+      /Satellite/company/announcements/categoryOverview.do?method=searchExtended&selectedPublicationTypes=Tender
+      shows 18 pages (348 entries), paged through onclick links and the session cookie.
 
   - name: Plzeň Region E-ZAK
     url: https://ezak.cnpk.cz/contract_index.html?direction=asc&orderby=name&page=1&state=OFFERS&type=all
@@ -265,9 +283,9 @@ portals:
     split: development
     expect: serving
     best_method: html
-    entry_url: https://www.uvo.gov.sk/vyhladavanie/vyhladavanie-zakaziek
+    entry_url: https://www.uvo.gov.sk/vyhladavanie/vyhladavanie-zakaziek?datumAktualizacie=7
     readiness: needs-five-download-baseline
-    note: The public results include buyer and publication date and link to unique tender detail pages. A sampled detail has a public documents tab.
+    note: The public results include buyer and publication date and link to unique tender detail pages. A sampled detail has a public documents tab. The unfiltered listing is the whole archive (105,292 records, 5,265 pages of 20 on 2026-11-21), beyond the reader's 250-page limit, so a read can never match its total. The form has no open-tenders filter; datumAktualizacie=7 (updated in the last 7 days) gives 782 records on 40 pages.
 
   - name: BOAMP
     url: https://www.boamp.fr/pages/recherche/?sort=dateparution
@@ -324,11 +342,10 @@ portals:
     software: TED
     kind: js-app
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://api.ted.europa.eu/v3/notices/search
-    readiness: needs-five-download-baseline
-    note: Added from the Tender Atlas source list. Atlas reads the public anonymous search API, which returns notice IDs, buyers, CPV codes, deadlines and lot document URLs. Not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The public notice search requires POST, which Watchtower cannot read.
+    note: Tender Atlas uses the anonymous JSON search at https://api.ted.europa.eu/v3/notices/search.
     evidence: https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html
 
   - name: Bekanntmachungsservice
@@ -339,9 +356,9 @@ portals:
     split: development
     expect: serving
     best_method: ocds
-    entry_url: https://oeffentlichevergabe.de/api/notice-exports?format=ocds.zip
-    readiness: needs-five-download-baseline
-    note: Added from the Tender Atlas source list. Atlas reads the daily federal OCDS export, which lags by one day. Notice PDFs are at /api/notices/{id}?format=pdf. Not yet run through Watchtower.
+    entry_url: https://oeffentlichevergabe.de/api/notice-exports?pubDay=2026-11-19&format=ocds.zip
+    readiness: needs-ocds-archive-reader
+    note: The public daily OCDS export is a ZIP archive. The labelled URL is the Tender Atlas reference day. Watchtower's OCDS reader currently expects a JSON package.
     evidence: https://oeffentlichevergabe.de/ui/de/publicationPolicy
 
   - name: Plataforma de Contratación del Sector Público
@@ -351,10 +368,10 @@ portals:
     kind: multi-step
     split: development
     expect: serving
-    best_method: atom
+    best_method: feed
     entry_url: https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom
     readiness: needs-five-download-baseline
-    note: Added from the Tender Atlas source list. Atlas reads the national Atom syndication feed of contracting-profile notices with CODICE XML entries, excluding minor contracts. Not yet run through Watchtower.
+    note: The official national Atom feed publishes notices from contracting profiles, excluding minor contracts. A Watchtower sample exceeded the page-size limit.
     evidence: https://contrataciondelsectorpublico.gob.es/wps/portal/DatosAbiertos
 
   - name: SEAP e-licitatie.ro
@@ -363,11 +380,10 @@ portals:
     software: SEAP
     kind: js-app
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://www.e-licitatie.ro/api-pub/NoticeCommon/GetCNoticeList/
-    readiness: needs-five-download-baseline
-    note: The Angular listing POSTs a JSON filter to this public route (about 190 contract notices and 390 award notices a day). Detail pages are routed per notice type, e.g. /pub/notices/c-notice/v2/view/{cNoticeId} and /pub/notices/simplified-notice/v2/view/{cNoticeId}. Collected by Tender Atlas; not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The public contract-notice listing requires POST, which Watchtower cannot read.
+    note: The Angular listing POSTs a JSON filter to https://www.e-licitatie.ro/api-pub/NoticeCommon/GetCNoticeList/.
     evidence: https://www.e-licitatie.ro/pub/notices/contract-notices/list/0/0
 
   - name: simap.ch
@@ -380,20 +396,19 @@ portals:
     best_method: json
     entry_url: https://www.simap.ch/api/publications/v2/project/project-search?newestPublicationFrom=2026-11-19&newestPublicationUntil=2026-11-19
     readiness: needs-five-download-baseline
-    note: The search UI reads this public JSON route, paged by a lastItem cursor (20 per page, about 130 publications a day). Detail pages are /en/project-detail/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    note: The dated public GET returned 20 projects with IDs, titles and publication dates. The search pages by a lastItem cursor. The endpoint requires a date range, and this URL is the reference sample.
     evidence: https://www.simap.ch/
 
   - name: KIMDIS
-    url: https://cerpp.eprocurement.gov.gr/kimds2/unprotected/searchNotice.htm
+    url: https://cerpp.eprocurement.gov.gr/upgkimdis/unprotected/home.xhtml
     country: GR
     software: KIMDIS
     kind: multi-step
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0
-    readiness: needs-five-download-baseline
-    note: The open-data API takes a POSTed date range and returns about 1,300 notices a day, 50 per page. Each notice PDF is public at /khmdhs-opendata/notice/attachment/{referenceNumber}. Bursts get HTTP 429 with no Retry-After. Collected by Tender Atlas; not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The open-data notice search requires POST, which Watchtower cannot read.
+    note: The search takes a JSON date range at https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0. Notice PDFs are public by reference number. On 2026-11-21 the old kimds2 search page returned HTTP 503 and the site root redirected to this upgkimdis app. A GET on the search returns HTTP 500.
     evidence: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/swagger-ui/index.html
 
   - name: Doffin
@@ -402,11 +417,10 @@ portals:
     software: Doffin
     kind: js-app
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://api.doffin.no/webclient/api/v2/search-api/search
-    readiness: needs-five-download-baseline
-    note: The search UI POSTs to this keyless web-client route; the documented public API needs a subscription key. A search returns at most 1,000 hits, so query by publication date. Detail pages are /notices/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The anonymous web-client search requires POST, which Watchtower cannot read.
+    note: The search UI uses https://api.doffin.no/webclient/api/v2/search-api/search. The separately documented API requires a subscription key.
     evidence: https://doffin.no/
 
   - name: Latvia EIS
@@ -416,8 +430,8 @@ portals:
     kind: multi-step
     split: development
     expect: serving
-    best_method: csv
-    entry_url: https://data.gov.lv/dati/api/3/action/package_show?id=izsludinato-iepirkumu-datu-grupa
+    best_method: json
+    entry_url: https://data.gov.lv/dati/api/3/action/datastore_search?resource_id=f2a08974-d59a-4d83-92f2-4194cb2bd97d&limit=8
     readiness: needs-five-download-baseline
-    note: Announced e-tenders are published as a yearly CSV refreshed daily (one row per lot), each linking to /EKEIS/Supplier/Procurement/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    note: Latvia's open-data portal exposes the 2026 CSV as a JSON DataStore resource. Two pages returned distinct rows with tender IDs, buyers, deadlines and links to EIS notices. One source row can represent a lot.
     evidence: https://data.gov.lv/dati/lv/dataset/izsludinato-iepirkumu-datu-grupa

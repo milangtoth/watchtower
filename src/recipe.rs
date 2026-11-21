@@ -40,12 +40,9 @@ const LISTING_PAGE_LIMIT: usize = 250;
 /// Seconds to wait after an OCDS API answers a later page with something other than JSON.
 const OCDS_THROTTLE_WAIT: u64 = 300;
 
-/// Days of releases an OCDS preset read asks for. Open tenders are published or updated within
-/// this window, so the read does not page through the publisher's whole history.
+/// Days of releases an OCDS preset read asks for when its entry URL filters by date, so the
+/// read does not page through the publisher's whole history.
 const OCDS_WINDOW_DAYS: i64 = 90;
-
-/// The largest page the Find a Tender and Contracts Finder OCDS APIs return.
-const OCDS_PAGE_SIZE: &str = "100";
 
 /// More URLs than this in a sitemap would take too long to read at one request per second.
 const SITEMAP_PAGE_LIMIT: usize = 500;
@@ -92,6 +89,10 @@ pub struct Recipe {
     /// stops at an empty page or once the listing total is reached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_parameter: Option<String>,
+    /// Portal wording for the buyer's label on detail pages, such as "from", read from a
+    /// definition list when no detail field selects the buyer. Lowercase, without a colon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buyer_labels: Vec<String>,
 }
 
 /// Reads `items` as a plain path. Models sometimes write it like the other selections, as
@@ -280,6 +281,12 @@ impl Recipe {
             };
             validate_path(format, &rule.path).context("documents")?;
         }
+        for label in &self.buyer_labels {
+            ensure!(
+                !label.trim().is_empty() && label == &label.to_lowercase(),
+                "buyer_labels are lowercase labels such as \"from\""
+            );
+        }
         if let Some(timezone) = &self.timezone {
             ensure!(timezone.parse::<Tz>().is_ok(), "invalid IANA timezone");
         }
@@ -466,8 +473,9 @@ pub async fn read(
         Some(start) => resolve(portal_url, start).map_err(incomplete)?,
         None => portal_url.clone(),
     };
+    let mut windowed = false;
     if recipe.preset == Some(Preset::Ocds) {
-        start = ocds_window(&start, chrono::Utc::now());
+        (start, windowed) = ocds_window(&start, chrono::Utc::now());
     }
     let mut queue = VecDeque::from([start]);
     let mut seen_pages = HashSet::new();
@@ -487,7 +495,7 @@ pub async fn read(
         }
         if seen_pages.len() > LISTING_PAGE_LIMIT {
             return Err(ReadFailure::Incomplete(format!(
-                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders"
+                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders, such as a status filter or a search form filter link"
             )));
         }
         listing_pages.push(url.to_string());
@@ -520,6 +528,9 @@ pub async fn read(
                 ));
             }
             total = Some(count);
+        }
+        if listing_pages.len() == 1 {
+            too_many_pages(&listing, recipe)?;
         }
         empty_state |= listing.empty_state;
         listing_links.extend(listing.links.all);
@@ -642,8 +653,67 @@ pub async fn read(
             unfollowed_links,
             samples,
             listing_links,
+            windowed,
         },
     })
+}
+
+/// Fails on the first page when it already shows the listing has more pages than the reader
+/// reads: a total that needs them at this page size, or a numbered link to a later last page.
+fn too_many_pages(listing: &ListingPage, recipe: &Recipe) -> Result<(), ReadFailure> {
+    let rows = listing.rows.len();
+    let pages = listing
+        .total
+        .filter(|_| rows > 0)
+        .map(|total| total.div_ceil(rows))
+        .into_iter()
+        .chain(
+            recipe
+                .page_parameter
+                .is_none()
+                .then(|| listing.next.first())
+                .flatten()
+                .and_then(|next| last_linked_page(next, &listing.links.all)),
+        )
+        .max();
+    match pages {
+        Some(pages) if pages > LISTING_PAGE_LIMIT => Err(ReadFailure::Incomplete(format!(
+            "The listing has {pages} pages, more than {LISTING_PAGE_LIMIT}; use a listing limited to open tenders, such as a status filter or a search form filter link"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The highest page number among links that differ from the first page's `next` link only in
+/// its page number, such as a "last page" link. Only a next link numbered 1 or 2 counts, so an
+/// offset parameter is never read as a page number.
+fn last_linked_page(next: &Url, links: &HashSet<String>) -> Option<usize> {
+    let pairs: Vec<(String, String)> = next.query_pairs().into_owned().collect();
+    let links: Vec<Url> = links
+        .iter()
+        .filter_map(|link| Url::parse(link).ok())
+        .filter(|link| link.path() == next.path())
+        .collect();
+    pairs
+        .iter()
+        .filter(|(_, value)| matches!(value.parse::<usize>(), Ok(1 | 2)))
+        .filter_map(|(key, _)| {
+            links
+                .iter()
+                .filter_map(|link| {
+                    let other: Vec<(String, String)> = link.query_pairs().into_owned().collect();
+                    let same_others = other.len() == pairs.len()
+                        && pairs.iter().zip(&other).all(|(mine, theirs)| {
+                            mine.0 == theirs.0 && (mine.0 == *key || mine.1 == theirs.1)
+                        });
+                    same_others
+                        .then(|| other.iter().find(|(name, _)| name == key))
+                        .flatten()
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                })
+                .max()
+        })
+        .max()
 }
 
 fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
@@ -819,50 +889,80 @@ fn ocds_listing(page: &Page) -> Result<ListingPage> {
     })
 }
 
-/// Narrows an OCDS API URL to tender-stage releases published or updated in the last
-/// `OCDS_WINDOW_DAYS`, in the largest pages the API allows, using the query parameters of the
-/// API family it recognizes. The window ends now, so the API's cursor reaches a last page.
+/// Shifts the date filters an OCDS entry URL already carries to the last `OCDS_WINDOW_DAYS`.
 ///
-/// Find a Tender (`ocdsReleasePackages`, `ocdsRecordPackages`) filters with `updatedFrom`,
-/// `updatedTo`, `stages` and `limit` and pages with `cursor`. Contracts Finder (`OCDS/Search`)
-/// uses `publishedFrom` and `publishedTo`. Other URLs are read as given. A cursor in the entry
-/// URL is dropped so that every read starts at the window's first page.
-fn ocds_window(url: &Url, now: chrono::DateTime<chrono::Utc>) -> Url {
-    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
-    let has = |name: &str| {
-        url.query_pairs()
-            .any(|(key, _)| key.eq_ignore_ascii_case(name))
-    };
-    let (from, to) = if path.ends_with("/ocdsreleasepackages")
-        || path.ends_with("/ocdsrecordpackages")
-        || has("updatedFrom")
-        || has("updatedTo")
-    {
-        ("updatedFrom", "updatedTo")
-    } else if path.ends_with("/ocds/search") || has("publishedFrom") || has("publishedTo") {
-        ("publishedFrom", "publishedTo")
-    } else {
-        return url.clone();
-    };
-    let replaced = [from, to, "stages", "limit", "cursor"];
-    let mut pairs: Vec<(String, String)> = url
+/// A query parameter is a date filter when its value is a date or date-time and its name ends
+/// like a range bound: `from`, `since`, `after` or `start` for the window's start, `to`,
+/// `until`, `before` or `end` for its end. Start bounds move to `now - OCDS_WINDOW_DAYS` and end
+/// bounds to `now`, each in the value's own format, so the API's cursor reaches a last page.
+/// Other parameters, such as `stages` or `limit`, keep the values the entry URL gives them, and
+/// a `cursor` is dropped so that every read starts at the window's first page.
+///
+/// A URL without date filters is read as given: choosing filters is left to the probe or the
+/// model. Also returns whether the read is windowed, that is, limited to releases from a start
+/// date on. A windowed read leaves out older open tenders, so their absence says nothing.
+fn ocds_window(url: &Url, now: chrono::DateTime<chrono::Utc>) -> (Url, bool) {
+    let start = now - chrono::Duration::days(OCDS_WINDOW_DAYS);
+    let mut shifted = false;
+    let mut windowed = false;
+    let pairs: Vec<(String, String)> = url
         .query_pairs()
-        .filter(|(key, _)| !replaced.iter().any(|name| key.eq_ignore_ascii_case(name)))
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("cursor"))
+        .map(|(key, value)| {
+            let value = match date_bound(&key).zip(date_format(&value)) {
+                Some((bound, format)) => {
+                    shifted = true;
+                    windowed |= bound == DateBound::Start;
+                    let time = if bound == DateBound::Start {
+                        start
+                    } else {
+                        now
+                    };
+                    time.format(format).to_string()
+                }
+                None => value.into_owned(),
+            };
+            (key.into_owned(), value)
+        })
         .collect();
-    let stamp = |time: chrono::DateTime<chrono::Utc>| time.format("%Y-%m-%dT%H:%M:%S").to_string();
-    pairs.extend([
-        (
-            from.to_owned(),
-            stamp(now - chrono::Duration::days(OCDS_WINDOW_DAYS)),
-        ),
-        (to.to_owned(), stamp(now)),
-        ("stages".to_owned(), "tender".to_owned()),
-        ("limit".to_owned(), OCDS_PAGE_SIZE.to_owned()),
-    ]);
-    let mut windowed = url.clone();
-    windowed.query_pairs_mut().clear().extend_pairs(pairs);
-    windowed
+    if !shifted {
+        return (url.clone(), false);
+    }
+    let mut moved = url.clone();
+    moved.query_pairs_mut().clear().extend_pairs(pairs);
+    (moved, windowed)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DateBound {
+    Start,
+    End,
+}
+
+/// Which end of a date range a query parameter's name points at.
+fn date_bound(key: &str) -> Option<DateBound> {
+    let key = key.to_ascii_lowercase();
+    let ends = |suffixes: &[&str]| suffixes.iter().any(|suffix| key.ends_with(suffix));
+    if ends(&["from", "since", "after", "start"]) {
+        Some(DateBound::Start)
+    } else if ends(&["to", "until", "before", "end"]) {
+        Some(DateBound::End)
+    } else {
+        None
+    }
+}
+
+/// The `strftime` format of a date or date-time query value, or `None` for any other value.
+fn date_format(value: &str) -> Option<&'static str> {
+    if DateTime::parse_from_rfc3339(value).is_ok() {
+        Some("%Y-%m-%dT%H:%M:%SZ")
+    } else if NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").is_ok() {
+        Some("%Y-%m-%dT%H:%M:%S")
+    } else if NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok() {
+        Some("%Y-%m-%d")
+    } else {
+        None
+    }
 }
 
 /// The same URL with its page-number query parameter increased by one.
@@ -1046,9 +1146,8 @@ fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
     resolve_field_url(&mut fields, &page.url);
     if let Source::Html(document) = &source {
         let content = main_content(document);
-        let gov_uk = page.url.host_str() == Some("www.gov.uk");
         if !fields.contains_key("buyerName")
-            && let Some(buyer) = metadata::buyer(content, gov_uk)
+            && let Some(buyer) = metadata::buyer(content, &recipe.buyer_labels)
         {
             fields.insert("buyerName".into(), vec![buyer]);
         }
@@ -1057,11 +1156,12 @@ fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
         {
             fields.insert("publicationDate".into(), vec![date.to_string()]);
         }
+        // The learned timezone first, otherwise the timezone of the portal's country domain.
         let timezone = recipe
             .timezone
             .as_deref()
             .and_then(|name| name.parse().ok())
-            .or_else(|| gov_uk.then_some(chrono_tz::Europe::London));
+            .or_else(|| page.url.host_str().and_then(metadata::country_timezone));
         if fields
             .get("submissionDeadline")
             .and_then(|values| values.first())
@@ -1119,6 +1219,22 @@ fn find_documents(node: &Node<'_>, recipe: &Recipe, base: &Url) -> Result<Attach
         fallback: false,
         scope: None,
     })
+}
+
+/// Whether a page at `depth` belongs to the tender: depth 0 is the tender's own page and depth 1
+/// a page linked from it, such as an HTML attachment. Pages the fallback finds further away
+/// belong to other publications (for example a standard contract set linked from a guidance
+/// page), so their files are not the tender's documents. Pages the recipe selects were learned
+/// on this portal and are followed to any depth.
+fn own_section(source: LinkSource, depth: usize) -> bool {
+    source == LinkSource::Recipe || depth <= 1
+}
+
+fn skip_foreign_page(url: &Url) {
+    tracing::info!(
+        location = %location(url),
+        "Skipping a page outside the tender's own section"
+    );
 }
 
 /// How an attachment link was found. Recipe selectors were learned on the portal's own tender
@@ -1230,6 +1346,10 @@ async fn attachment_files(
                     if page.url != link.url && visited.contains(&page.url) {
                         continue;
                     }
+                    if !own_section(link.source, link.depth + 1) {
+                        skip_foreign_page(&page.url);
+                        continue;
+                    }
                     (page, link.depth + 1)
                 }
             }
@@ -1266,17 +1386,27 @@ async fn attachment_files(
             }
             Err(error) => return Err(incomplete(error)),
         };
-        linked_pages += 1;
-        page_files.extend(more.files.iter().cloned());
+        // Only the recipe's own attachment pages must lead to files; a page the fallback guessed
+        // may legitimately point elsewhere.
+        if source == LinkSource::Recipe {
+            linked_pages += 1;
+            page_files.extend(more.files.iter().cloned());
+        }
         let here = Some(page.url.clone());
         files.extend(queue(more.files, depth, source, &here, None));
-        pages.extend(queue(
-            more.pages,
-            depth + 1,
-            source,
-            &here,
-            more.scope.as_deref(),
-        ));
+        if own_section(source, depth + 1) {
+            pages.extend(queue(
+                more.pages,
+                depth + 1,
+                source,
+                &here,
+                more.scope.as_deref(),
+            ));
+        } else {
+            for url in &more.pages {
+                skip_foreign_page(url);
+            }
+        }
         if samples.len() < 5 {
             samples.push(sample_page(&page, 16_000).body);
         }
@@ -1537,6 +1667,11 @@ fn resolve_many(node: &Node<'_>, select: Option<&Select>, base: &Url) -> Result<
 }
 
 fn resolve(base: &Url, value: &str) -> Result<Url> {
+    let value = match script_url(value) {
+        Some(Ok(url)) => url,
+        Some(Err(())) => anyhow::bail!("portal link is a script call without a URL"),
+        None => value,
+    };
     let mut url = base
         .join(value)
         .context("could not resolve a portal link")?;
@@ -1546,6 +1681,40 @@ fn resolve(base: &Url, value: &str) -> Result<Url> {
     );
     url.set_fragment(None);
     Ok(url)
+}
+
+/// The URL inside a JavaScript link handler, such as `submitTo('/search?page=2')` in an
+/// `onclick` attribute or a `javascript:` href. `None` when `value` is not a script call; an
+/// error when it is one without a quoted URL, such as `javascript:void(0)`.
+fn script_url(value: &str) -> Option<Result<&str, ()>> {
+    let value = value.trim();
+    let script = value
+        .get(..11)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("javascript:"))
+        || value.split_once('(').is_some_and(|(callee, arguments)| {
+            // A call ends its statement, unlike the brackets in a name like `file(1).pdf`.
+            arguments
+                .split_once(')')
+                .is_some_and(|(_, after)| after.trim().is_empty() || after.trim().starts_with(';'))
+                && !callee.is_empty()
+                && callee
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.'))
+        });
+    if !script {
+        return None;
+    }
+    let url = value
+        .split(['\'', '"'])
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .find(|quoted| {
+            quoted.starts_with(['/', '?', '.'])
+                || quoted.starts_with("http://")
+                || quoted.starts_with("https://")
+        });
+    Some(url.ok_or(()))
 }
 
 fn resolve_field_url(fields: &mut Fields, base: &Url) {
@@ -1612,6 +1781,11 @@ pub(crate) fn sample_page(page: &Page, limit: usize) -> PageSample {
             }
         }
         let content = main_content(&document);
+        // Filter options of search forms come first, so a long page of links cannot crowd out
+        // the way to a listing limited to open tenders.
+        for (url, label) in form_filters(content, &page.url) {
+            add_link(url.as_str(), label);
+        }
         let anchors = Selector::parse("a[href]").unwrap();
         for anchor in content.select(&anchors) {
             if let Some(href) = anchor
@@ -1630,6 +1804,79 @@ pub(crate) fn sample_page(page: &Page, limit: usize) -> PageSample {
         sample(&content.html(), limit)
     };
     PageSample { body, links }
+}
+
+/// Search form filter options as links: the form's action with one checkbox, radio or select
+/// option added to its query, labelled "Search form filter: <option label>". Same-origin forms
+/// only. The portal may still ignore a GET, so the link is a lead to sample, not a promise.
+fn form_filters(content: ElementRef<'_>, base: &Url) -> Vec<(Url, String)> {
+    const FILTER_LIMIT: usize = 12;
+    let forms = Selector::parse("form[action]").unwrap();
+    let options =
+        Selector::parse("input[type=checkbox][name][value], input[type=radio][name][value], select[name] option[value]")
+            .unwrap();
+    let labels = Selector::parse("label[for]").unwrap();
+    let text = |element: ElementRef<'_>| {
+        element
+            .text()
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut filters = Vec::new();
+    for form in content.select(&forms) {
+        let Some(action) = form
+            .value()
+            .attr("action")
+            .and_then(|action| base.join(action.trim()).ok())
+            .filter(|action| action.origin() == base.origin())
+        else {
+            continue;
+        };
+        for option in form.select(&options) {
+            let element = option.value();
+            let (name, value, label) = if element.name() == "option" {
+                let Some(select) = option
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .find(|parent| parent.value().name() == "select")
+                else {
+                    continue;
+                };
+                (
+                    select.value().attr("name").unwrap_or_default(),
+                    element.attr("value").unwrap_or_default(),
+                    text(option),
+                )
+            } else {
+                let label = element
+                    .attr("id")
+                    .and_then(|id| {
+                        form.select(&labels)
+                            .find(|label| label.value().attr("for") == Some(id))
+                    })
+                    .map(text)
+                    .or_else(|| element.attr("title").map(str::to_owned))
+                    .unwrap_or_default();
+                (
+                    element.attr("name").unwrap_or_default(),
+                    element.attr("value").unwrap_or_default(),
+                    label,
+                )
+            };
+            if name.is_empty() || value.trim().is_empty() {
+                continue;
+            }
+            let mut url = action.clone();
+            url.query_pairs_mut().append_pair(name, value);
+            let label = if label.is_empty() { value } else { &label };
+            filters.push((url, format!("Search form filter: {label}")));
+            if filters.len() == FILTER_LIMIT {
+                return filters;
+            }
+        }
+    }
+    filters
 }
 
 fn main_content(document: &Html) -> ElementRef<'_> {
@@ -1895,47 +2142,52 @@ mod reader_fix_tests {
     }
 
     #[test]
-    fn ocds_window_asks_find_a_tender_for_recent_tender_stage_releases() {
+    fn ocds_window_shifts_the_date_filters_the_entry_url_carries() {
         let entry = Url::parse(
-            "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=25&cursor=abc",
+            "https://portal.example/api/releases?updatedFrom=2024-01-01T00:00:00&updatedTo=2024-02-01T00:00:00&stages=tender&limit=25&cursor=abc",
         )
         .unwrap();
+        let (windowed, is_windowed) = ocds_window(&entry, at(9));
         assert_eq!(
-            ocds_window(&entry, at(9)).as_str(),
-            "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?\
+            windowed.as_str(),
+            "https://portal.example/api/releases?\
              updatedFrom=2026-08-22T09%3A00%3A00&updatedTo=2026-11-20T09%3A00%3A00\
-             &stages=tender&limit=100"
+             &stages=tender&limit=25"
         );
-        let records = Url::parse("https://fts.example/api/1.0/ocdsRecordPackages?lang=en").unwrap();
-        let windowed = ocds_window(&records, at(9));
-        let query: Vec<_> = windowed
-            .query_pairs()
-            .map(|(key, _)| key.into_owned())
-            .collect();
+        assert!(is_windowed);
+
+        // Other names and formats keep their own shape; only a start bound makes a window.
+        let entry = Url::parse(
+            "https://portal.example/ocds/search?publishedFrom=2025-03-01&lang=en&modifiedSince=2025-03-01T00:00:00Z",
+        )
+        .unwrap();
+        let (windowed, is_windowed) = ocds_window(&entry, at(0));
+        let query: Vec<_> = windowed.query_pairs().into_owned().collect();
         assert_eq!(
             query,
-            ["lang", "updatedFrom", "updatedTo", "stages", "limit"]
+            [
+                ("publishedFrom".into(), "2026-08-22".into()),
+                ("lang".into(), "en".into()),
+                ("modifiedSince".into(), "2026-08-22T00:00:00Z".into()),
+            ] as [(String, String); 3]
         );
+        assert!(is_windowed);
+        let ends = Url::parse("https://portal.example/api/releases?dateTo=2025-01-01").unwrap();
+        let (windowed, is_windowed) = ocds_window(&ends, at(0));
+        assert_eq!(windowed.query(), Some("dateTo=2026-11-20"));
+        assert!(!is_windowed);
     }
 
     #[test]
-    fn ocds_window_uses_published_dates_for_contracts_finder_and_leaves_other_apis_alone() {
-        let entry = Url::parse(
-            "https://www.contractsfinder.service.gov.uk/Published/Notices/OCDS/Search?stages=award",
-        )
-        .unwrap();
-        let windowed = ocds_window(&entry, at(0));
-        let query: BTreeMap<_, _> = windowed.query_pairs().into_owned().collect();
-        assert_eq!(query["publishedFrom"], "2026-08-22T00:00:00");
-        assert_eq!(query["publishedTo"], "2026-11-20T00:00:00");
-        assert_eq!(query["stages"], "tender");
-        assert_eq!(query["limit"], "100");
+    fn ocds_window_leaves_urls_without_date_filters_unchanged() {
         for other in [
+            "https://portal.example/api/releases?stages=tender&limit=25&cursor=abc",
             "https://portal.example/ocds?page=2",
             "https://portal.example/api/releases.json",
+            "https://portal.example/api/releases?from=somewhere&to=elsewhere",
         ] {
             let url = Url::parse(other).unwrap();
-            assert_eq!(ocds_window(&url, at(0)), url);
+            assert_eq!(ocds_window(&url, at(0)), (url, false));
         }
     }
 
@@ -1944,15 +2196,15 @@ mod reader_fix_tests {
         let requests = Requests::default();
         let router = Router::new()
             .route(
-                "/api/1.0/ocdsReleasePackages",
+                "/api/releases",
                 get(
                     |State(requests): State<Requests>, RawQuery(query): RawQuery| async move {
                         let query = query.unwrap_or_default();
                         requests.lock().unwrap().push(query.clone());
                         let body = if query.contains("cursor=") {
-                            include_str!("../tests/fixtures/ocds/fts_window_page2.json")
+                            include_str!("../tests/fixtures/ocds/window_page2.json")
                         } else {
-                            include_str!("../tests/fixtures/ocds/fts_window_page1.json")
+                            include_str!("../tests/fixtures/ocds/window_page1.json")
                         };
                         ([(header::CONTENT_TYPE, "application/json")], body)
                     },
@@ -1962,7 +2214,9 @@ mod reader_fix_tests {
         let base = serve(router).await;
         let candidate = ConnectionCandidate {
             method: ConnectionMethod::Ocds,
-            entry_url: format!("{base}/api/1.0/ocdsReleasePackages?stages=tender&limit=25"),
+            entry_url: format!(
+                "{base}/api/releases?updatedFrom=2024-01-01T00:00:00&updatedTo=2024-02-01T00:00:00&stages=tender"
+            ),
             found_via: "test".into(),
             http_status: 200,
             content_type: Some("application/json".into()),
@@ -1986,7 +2240,8 @@ mod reader_fix_tests {
         assert_eq!(requests.len(), 2);
         let first: BTreeMap<String, String> = url_query(&requests[0]);
         assert_eq!(first["stages"], "tender");
-        assert_eq!(first["limit"], "100");
+        assert!(!first.contains_key("limit"));
+        assert!(read.evidence.windowed);
         let parse = |value: &str| {
             NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
                 .unwrap()
@@ -2329,5 +2584,111 @@ mod sample_tests {
             stated("Stichting Openbaar Onderwijs".into()).as_deref(),
             Some("Stichting Openbaar Onderwijs")
         );
+    }
+}
+
+#[cfg(test)]
+mod listing_route_tests {
+    use super::*;
+
+    #[test]
+    fn links_inside_javascript_handlers_resolve_to_their_quoted_url() {
+        let base = Url::parse("https://portal.example/app/welcome.do").unwrap();
+        for (value, expected) in [
+            (
+                "setTargetAndSubmit('/app/search.do?method=showTable&page=2')",
+                "https://portal.example/app/search.do?method=showTable&page=2",
+            ),
+            (
+                r#"javascript:go("?page=3");"#,
+                "https://portal.example/app/welcome.do?page=3",
+            ),
+            (
+                "window.location.assign('https://portal.example/list?page=4'); return false;",
+                "https://portal.example/list?page=4",
+            ),
+            // Plain links, including ones with brackets in a file name, are unchanged.
+            ("file(1).pdf", "https://portal.example/app/file(1).pdf"),
+            ("/list?page=2", "https://portal.example/list?page=2"),
+        ] {
+            assert_eq!(resolve(&base, value).unwrap().as_str(), expected, "{value}");
+        }
+        for value in ["javascript:void(0);", "toggle('menu')"] {
+            let error = resolve(&base, value).unwrap_err().to_string();
+            assert!(
+                error.contains("script call without a URL"),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_form_options_are_offered_as_filter_links_before_other_links() {
+        let mut body = String::from(
+            r#"<html><body><main>
+            <form name="search" method="post" action="/app/overview.do?method=searchExtended">
+              <input type="text" name="searchText" value="">
+              <input type="checkbox" id="all" name="allTypes" checked>
+              <input type="checkbox" name="types" value="Tender" id="typeTender" title="Tender">
+              <label for="typeTender">Call for tenders</label>
+              <input type="checkbox" name="types" value="Awarded" title="Awarded contract">
+              <select name="sort"><option value="">Any</option><option value="date">Newest</option></select>
+              <input type="submit" value="Search">
+            </form>
+            <form action="https://elsewhere.example/search"><input type="radio" name="x" value="1"></form>"#,
+        );
+        for index in 0..60 {
+            body += &format!(r#"<a href="/app/category/{index}">Category {index}</a>"#);
+        }
+        body += "</main></body></html>";
+        let page = Page {
+            url: Url::parse("https://portal.example/app/overview.do?method=show").unwrap(),
+            body,
+        };
+        let links = sample_page(&page, 20_000).links;
+        let filters: Vec<_> = links
+            .iter()
+            .take(3)
+            .map(|link| (link.label.as_str(), link.url.as_str()))
+            .collect();
+        assert_eq!(
+            filters,
+            [
+                (
+                    "Search form filter: Call for tenders",
+                    "https://portal.example/app/overview.do?method=searchExtended&types=Tender"
+                ),
+                (
+                    "Search form filter: Awarded contract",
+                    "https://portal.example/app/overview.do?method=searchExtended&types=Awarded"
+                ),
+                (
+                    "Search form filter: Newest",
+                    "https://portal.example/app/overview.do?method=searchExtended&sort=date"
+                ),
+            ]
+        );
+        assert!(links[3].label.starts_with("Category"));
+        assert!(!links.iter().any(|link| link.url.contains("elsewhere")));
+    }
+
+    #[test]
+    fn last_linked_page_reads_page_numbers_but_not_offsets_or_other_links() {
+        let next = Url::parse("https://p.example/t?method=show&page=2").unwrap();
+        let links: HashSet<String> = [
+            "https://p.example/t?method=show&page=338",
+            "https://p.example/t?method=sort&page=900",
+            "https://p.example/other?method=show&page=999",
+            "https://p.example/t?method=show&page=17",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(last_linked_page(&next, &links), Some(338));
+        let offset = Url::parse("https://p.example/t?method=show&offset=20").unwrap();
+        let links: HashSet<String> = ["https://p.example/t?method=show&offset=6740".to_owned()]
+            .into_iter()
+            .collect();
+        assert_eq!(last_linked_page(&offset, &links), None);
     }
 }

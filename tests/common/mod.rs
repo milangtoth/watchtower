@@ -93,6 +93,10 @@ pub struct Layout {
     /// Listing pages also carry "First" and "Previous" links, and the last page a link to
     /// itself, all with the next-link class.
     pub nav_links: bool,
+    /// OCDS release dates (RFC 3339) by tender ID, in place of the fixture's default date.
+    pub ocds_dates: BTreeMap<&'static str, String>,
+    /// OCDS tender statuses by tender ID, in place of `active`.
+    pub ocds_statuses: BTreeMap<&'static str, &'static str>,
 }
 
 impl Layout {
@@ -112,6 +116,8 @@ impl Layout {
             ocds_broken: false,
             ocds_throttled: false,
             nav_links: false,
+            ocds_dates: BTreeMap::new(),
+            ocds_statuses: BTreeMap::new(),
         }
     }
 
@@ -251,23 +257,50 @@ pub fn ocds_page(layout: &Layout, index: usize) -> Value {
         .get(index)
         .into_iter()
         .flatten()
-        .map(|row| {
-            json!({
-                "ocid": format!("ocds-fixture-{}", row.id), "date": "2026-11-01T09:00:00+01:00",
-                "buyer": {"name": row.buyer},
-                "tender": {"id": row.id, "title": row.title, "status": "active",
-                    "procurementMethod": "open", "mainProcurementCategory": "services",
-                    "tenderPeriod": {"endDate": DEADLINE},
-                    "items": [{"classification": {"scheme": "CPV", "id": "72000000-5"}}],
-                    "documents": row.files.iter().map(|name| json!({"url": format!("/files/{name}")})).collect::<Vec<_>>()}
-            })
-        })
+        .map(|row| ocds_release(layout, row))
         .collect();
     let mut package = json!({"releases": releases});
     if index + 1 < layout.pages.len() {
         package["links"] = json!({"next": format!("/ocds/{}", index + 1)});
     }
     package
+}
+
+/// The releases of every listing page dated on or after `from`, as an API filtered by date
+/// answers.
+pub fn ocds_since(layout: &Layout, from: &str) -> Value {
+    let from = chrono::NaiveDateTime::parse_from_str(from, "%Y-%m-%dT%H:%M:%S")
+        .unwrap()
+        .and_utc();
+    let releases: Vec<Value> = layout
+        .rows()
+        .map(|row| ocds_release(layout, row))
+        .filter(|release| {
+            chrono::DateTime::parse_from_rfc3339(release["date"].as_str().unwrap()).unwrap() >= from
+        })
+        .collect();
+    json!({"releases": releases})
+}
+
+fn ocds_release(layout: &Layout, row: &Row) -> Value {
+    let date = layout
+        .ocds_dates
+        .get(row.id)
+        .map_or("2026-11-01T09:00:00+01:00", String::as_str);
+    let status = layout
+        .ocds_statuses
+        .get(row.id)
+        .copied()
+        .unwrap_or("active");
+    json!({
+        "ocid": format!("ocds-fixture-{}", row.id), "date": date,
+        "buyer": {"name": row.buyer},
+        "tender": {"id": row.id, "title": row.title, "status": status,
+            "procurementMethod": "open", "mainProcurementCategory": "services",
+            "tenderPeriod": {"endDate": DEADLINE},
+            "items": [{"classification": {"scheme": "CPV", "id": "72000000-5"}}],
+            "documents": row.files.iter().map(|name| json!({"url": format!("/files/{name}")})).collect::<Vec<_>>()}
+    })
 }
 
 pub async fn serve(site: Site) -> (String, tokio::task::JoinHandle<std::io::Result<()>>) {
@@ -365,6 +398,17 @@ pub async fn serve(site: Site) -> (String, tokio::task::JoinHandle<std::io::Resu
         .route(
             "/ocds",
             get(|State(site): State<Site>| async move { Json(ocds_page(&site.lock().unwrap(), 0)) }),
+        )
+        .route(
+            "/ocds/since",
+            get(
+                |State(site): State<Site>,
+                 axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    Json(ocds_since(&site.lock().unwrap(), &query["updatedFrom"]))
+                },
+            ),
         )
         .route(
             "/ocds/{index}",
@@ -700,6 +744,7 @@ impl Harness {
                 model: model.clone(),
                 interval,
                 recovery,
+                concurrency: watchtower::worker::CONCURRENCY,
             }
             .run(stop.clone()),
         );

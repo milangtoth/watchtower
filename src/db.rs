@@ -401,11 +401,19 @@ impl Store {
             }
             changed_tenders.push((key, tender));
         }
+        // A complete read closes the open tenders it no longer lists. A windowed read leaves
+        // out open tenders not updated within its window, so it closes them only by deadline.
         for (key, old) in previous {
             if old.tender.status == TenderStatus::Open {
                 let mut tender = old.tender;
-                tender.status = TenderStatus::Closed;
-                changed_tenders.push((key, tender));
+                if candidate.evidence.windowed {
+                    tender.close_if_due(now);
+                } else {
+                    tender.status = TenderStatus::Closed;
+                }
+                if tender.status == TenderStatus::Closed {
+                    changed_tenders.push((key, tender));
+                }
             }
         }
         let changed = changed_tenders.len();
