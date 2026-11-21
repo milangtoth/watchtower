@@ -88,6 +88,11 @@ pub struct Layout {
     pub listing_hits: Vec<std::time::Instant>,
     /// The OCDS endpoint answers with something that is not a package.
     pub ocds_broken: bool,
+    /// The OCDS endpoint answers pages after the first with HTML, as a throttled API might.
+    pub ocds_throttled: bool,
+    /// Listing pages also carry "First" and "Previous" links, and the last page a link to
+    /// itself, all with the next-link class.
+    pub nav_links: bool,
 }
 
 impl Layout {
@@ -105,6 +110,8 @@ impl Layout {
             login_wall: false,
             listing_hits: Vec::new(),
             ocds_broken: false,
+            ocds_throttled: false,
+            nav_links: false,
         }
     }
 
@@ -164,14 +171,35 @@ pub fn render(layout: &Layout, index: usize) -> String {
         );
     }
     html += "</table>";
+    let page_path = |page: usize| {
+        if page == 0 {
+            "/".to_owned()
+        } else {
+            format!("/page/{page}")
+        }
+    };
+    html += "<nav>";
+    if layout.nav_links && index > 0 {
+        html += &format!(
+            r#"<a class="{class}" href="/">First</a><a class="{class}" href="{previous}">Previous</a>"#,
+            class = layout.next_class,
+            previous = page_path(index - 1)
+        );
+    }
     if index + 1 < layout.pages.len() {
         html += &format!(
-            r#"<nav><a class="{}" href="/page/{}">Next page</a></nav>"#,
+            r#"<a class="{}" href="/page/{}">Next page</a>"#,
             layout.next_class,
             index + 1
         );
+    } else if layout.nav_links {
+        html += &format!(
+            r#"<a class="{}" href="{}">Next page</a>"#,
+            layout.next_class,
+            page_path(index)
+        );
     }
-    html + "</main>"
+    html + "</nav></main>"
 }
 
 fn listing(site: &Site, index: usize) -> axum::response::Response {
@@ -342,7 +370,37 @@ pub async fn serve(site: Site) -> (String, tokio::task::JoinHandle<std::io::Resu
             "/ocds/{index}",
             get(
                 |State(site): State<Site>, Path(index): Path<usize>| async move {
-                    Json(ocds_page(&site.lock().unwrap(), index))
+                    let layout = site.lock().unwrap();
+                    if layout.ocds_throttled {
+                        return Html("<html><body>Too many requests, try later</body></html>")
+                            .into_response();
+                    }
+                    Json(ocds_page(&layout, index)).into_response()
+                },
+            ),
+        )
+        .route(
+            "/api/paged",
+            get(
+                |State(site): State<Site>,
+                 axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    let layout = site.lock().unwrap();
+                    let page: usize = query.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+                    let items: Vec<Value> = layout
+                        .pages
+                        .get(page)
+                        .into_iter()
+                        .flatten()
+                        .map(|row| {
+                            json!({"id": row.id, "title": row.title, "buyer": row.buyer,
+                                "deadline": DEADLINE, "url": format!("/tenders/{}", row.id),
+                                "files": row.files.iter().map(|name| format!("/files/{name}")).collect::<Vec<_>>()})
+                        })
+                        .collect();
+                    Json(json!({"content": items, "totalElements": layout.rows().count(),
+                        "number": page, "last": page + 1 >= layout.pages.len()}))
                 },
             ),
         )
