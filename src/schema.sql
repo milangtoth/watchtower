@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS portals (
     id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, generation INTEGER NOT NULL DEFAULT 1,
     deleted INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'integrating',
     reason TEXT NOT NULL DEFAULT 'Waiting for the first read', tender_count INTEGER NOT NULL DEFAULT 0,
-    last_success_at TEXT, recipe TEXT, next_read_at INTEGER
+    last_success_at TEXT, recipe TEXT, next_read_at INTEGER, url_key TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, portal_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL,
