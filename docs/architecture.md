@@ -27,14 +27,11 @@ The reader handles linked HTML and JSON listings, detail pages, and tenders that
 
 ## Model usage
 
-SQLite records input, cached input, and output tokens for each model response, by portal, model, and operation. Use the query below on `watchtower.sqlite3` and multiply the totals by the selected model's rates per million tokens. Treat cached input separately from other input.
+SQLite records input, cached input and output tokens for each model response. Run the report from the repository root to see estimated USD per portal and operation. It reads `WATCHTOWER_MODEL` or accepts an explicit model.
 
-```sql
-SELECT portal_id, model, operation, COUNT(*) AS calls,
-       SUM(input_tokens - cached_input_tokens) AS uncached_input,
-       SUM(cached_input_tokens) AS cached_input,
-       SUM(output_tokens) AS output
-FROM model_usage
-GROUP BY portal_id, model, operation
+```sh
+python scripts/model_costs.py data/watchtower.sqlite3 --model gpt-5.4
 ```
+
+Use `--input-rate`, `--cached-input-rate`, and `--output-rate` for other models or pricing plans. Rates are in USD per million tokens.
 

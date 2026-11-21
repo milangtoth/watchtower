@@ -40,7 +40,7 @@ The dashboard shows each portal's state, reason, last success, tender count and 
 
 ## Model cost per portal
 
-Token use is recorded per portal and operation in SQLite. The query is in [docs/architecture.md](docs/architecture.md). Measured on 2026-11-20 with `gpt-5.4` at $2.50 input, $0.25 cached input and $15 output per 1M tokens:
+The [cost report](scripts/model_costs.py) reads token usage from SQLite and estimates USD per portal and operation. See the [usage instructions](docs/architecture.md#model-usage). Measured on 2026-11-20 with `gpt-5.4` at $2.50 input, $0.25 cached input and $15 output per 1M tokens:
 
 | Portal | Attach (learn and check) | Repair to date |
 |---|---:|---:|

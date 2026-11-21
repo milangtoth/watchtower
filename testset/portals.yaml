@@ -340,11 +340,10 @@ portals:
     software: TED
     kind: js-app
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://api.ted.europa.eu/v3/notices/search
-    readiness: needs-five-download-baseline
-    note: Added from the Tender Atlas source list. Atlas reads the public anonymous search API, which returns notice IDs, buyers, CPV codes, deadlines and lot document URLs. Not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The public notice search requires POST, which Watchtower cannot read.
+    note: Tender Atlas uses the anonymous JSON search at https://api.ted.europa.eu/v3/notices/search.
     evidence: https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html
 
   - name: Bekanntmachungsservice
@@ -355,9 +354,9 @@ portals:
     split: development
     expect: serving
     best_method: ocds
-    entry_url: https://oeffentlichevergabe.de/api/notice-exports?format=ocds.zip
-    readiness: needs-five-download-baseline
-    note: Added from the Tender Atlas source list. Atlas reads the daily federal OCDS export, which lags by one day. Notice PDFs are at /api/notices/{id}?format=pdf. Not yet run through Watchtower.
+    entry_url: https://oeffentlichevergabe.de/api/notice-exports?pubDay=2026-11-19&format=ocds.zip
+    readiness: needs-ocds-archive-reader
+    note: The public daily OCDS export is a ZIP archive. The labelled URL is the Tender Atlas reference day. Watchtower's OCDS reader currently expects a JSON package.
     evidence: https://oeffentlichevergabe.de/ui/de/publicationPolicy
 
   - name: Plataforma de Contratación del Sector Público
@@ -367,10 +366,10 @@ portals:
     kind: multi-step
     split: development
     expect: serving
-    best_method: atom
+    best_method: feed
     entry_url: https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom
     readiness: needs-five-download-baseline
-    note: Added from the Tender Atlas source list. Atlas reads the national Atom syndication feed of contracting-profile notices with CODICE XML entries, excluding minor contracts. Not yet run through Watchtower.
+    note: The official national Atom feed publishes notices from contracting profiles, excluding minor contracts. A Watchtower sample exceeded the page-size limit.
     evidence: https://contrataciondelsectorpublico.gob.es/wps/portal/DatosAbiertos
 
   - name: SEAP e-licitatie.ro
@@ -379,11 +378,10 @@ portals:
     software: SEAP
     kind: js-app
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://www.e-licitatie.ro/api-pub/NoticeCommon/GetCNoticeList/
-    readiness: needs-five-download-baseline
-    note: The Angular listing POSTs a JSON filter to this public route (about 190 contract notices and 390 award notices a day). Detail pages are routed per notice type, e.g. /pub/notices/c-notice/v2/view/{cNoticeId} and /pub/notices/simplified-notice/v2/view/{cNoticeId}. Collected by Tender Atlas; not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The public contract-notice listing requires POST, which Watchtower cannot read.
+    note: The Angular listing POSTs a JSON filter to https://www.e-licitatie.ro/api-pub/NoticeCommon/GetCNoticeList/.
     evidence: https://www.e-licitatie.ro/pub/notices/contract-notices/list/0/0
 
   - name: simap.ch
@@ -396,7 +394,7 @@ portals:
     best_method: json
     entry_url: https://www.simap.ch/api/publications/v2/project/project-search?newestPublicationFrom=2026-11-19&newestPublicationUntil=2026-11-19
     readiness: needs-five-download-baseline
-    note: The search UI reads this public JSON route, paged by a lastItem cursor (20 per page, about 130 publications a day). Detail pages are /en/project-detail/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    note: The dated public GET returned 20 projects with IDs, titles and publication dates. The search pages by a lastItem cursor. The endpoint requires a date range, and this URL is the reference sample.
     evidence: https://www.simap.ch/
 
   - name: KIMDIS
@@ -405,11 +403,10 @@ portals:
     software: KIMDIS
     kind: multi-step
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0
-    readiness: needs-five-download-baseline
-    note: The open-data API takes a POSTed date range and returns about 1,300 notices a day, 50 per page. Each notice PDF is public at /khmdhs-opendata/notice/attachment/{referenceNumber}. Bursts get HTTP 429 with no Retry-After. Collected by Tender Atlas; not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The open-data notice search requires POST, which Watchtower cannot read.
+    note: The search takes a JSON date range at https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=0. Notice PDFs are public by reference number.
     evidence: https://cerpp.eprocurement.gov.gr/khmdhs-opendata/swagger-ui/index.html
 
   - name: Doffin
@@ -418,11 +415,10 @@ portals:
     software: Doffin
     kind: js-app
     split: development
-    expect: serving
-    best_method: json
-    entry_url: https://api.doffin.no/webclient/api/v2/search-api/search
-    readiness: needs-five-download-baseline
-    note: The search UI POSTs to this keyless web-client route; the documented public API needs a subscription key. A search returns at most 1,000 hits, so query by publication date. Detail pages are /notices/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    expect: failed
+    readiness: unsupported-post
+    expected_blocker: The anonymous web-client search requires POST, which Watchtower cannot read.
+    note: The search UI uses https://api.doffin.no/webclient/api/v2/search-api/search. The separately documented API requires a subscription key.
     evidence: https://doffin.no/
 
   - name: Latvia EIS
@@ -432,8 +428,8 @@ portals:
     kind: multi-step
     split: development
     expect: serving
-    best_method: csv
-    entry_url: https://data.gov.lv/dati/api/3/action/package_show?id=izsludinato-iepirkumu-datu-grupa
+    best_method: json
+    entry_url: https://data.gov.lv/dati/api/3/action/datastore_search?resource_id=f2a08974-d59a-4d83-92f2-4194cb2bd97d&limit=8
     readiness: needs-five-download-baseline
-    note: Announced e-tenders are published as a yearly CSV refreshed daily (one row per lot), each linking to /EKEIS/Supplier/Procurement/{id}. Collected by Tender Atlas; not yet run through Watchtower.
+    note: Latvia's open-data portal exposes the 2026 CSV as a JSON DataStore resource. Two pages returned distinct rows with tender IDs, buyers, deadlines and links to EIS notices. One source row can represent a lot.
     evidence: https://data.gov.lv/dati/lv/dataset/izsludinato-iepirkumu-datu-grupa
