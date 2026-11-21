@@ -1447,6 +1447,26 @@ fn attachment_page_links(
         found = scoped_html_attachment_links(page, scope);
         found_by = LinkSource::Fallback;
     }
+    // A numbered document page, such as E-ZAK's document_download_139545.html, links the file it
+    // is about under its own number. Take that file whatever the recipe matched, and leave out
+    // other numbered copies, such as an audit record of the same document.
+    if let Some(number) = document_number(&page.url) {
+        let own: Vec<Url> = scoped_html_attachment_links(page, None)
+            .files
+            .into_iter()
+            .filter(|url| carries_number(url, &number))
+            .collect();
+        if !own.is_empty() {
+            if found_by == LinkSource::Fallback {
+                found.files.clear();
+            }
+            for url in own {
+                if !found.files.contains(&url) {
+                    found.files.push(url);
+                }
+            }
+        }
+    }
     ensure!(
         !found.pages.is_empty() || !found.files.is_empty(),
         "No attachment links matched on document page {}{}",
@@ -1518,6 +1538,7 @@ fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments
                         | "xml"
                 )
             })
+            || slugged_file(&url)
         {
             let label = anchor.text().collect::<Vec<_>>().join(" ");
             files.push((url, label));
@@ -1575,6 +1596,58 @@ fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments
         fallback: true,
         scope,
     }
+}
+
+/// File extensions the HTML fallback treats as downloads.
+const FILE_EXTENSIONS: &[&str] = &[
+    "pdf", "zip", "doc", "docx", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "csv", "rtf", "txt",
+    "xml",
+];
+
+/// A link whose last path segment ends in a file type written after a dash or underscore
+/// instead of a period, as in `document_139545/df58…-vyzva-k-podani-nabidek_ga-pdf`.
+fn slugged_file(url: &Url) -> bool {
+    let Some(last) = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+    else {
+        return false;
+    };
+    let last = last.to_ascii_lowercase();
+    !last.contains('.')
+        && FILE_EXTENSIONS.iter().any(|extension| {
+            last.len() > extension.len() + 1
+                && last.ends_with(extension)
+                && last[..last.len() - extension.len()].ends_with(['-', '_'])
+        })
+}
+
+/// The number of a numbered document page, such as 139545 in `document_download_139545.html`.
+fn document_number(url: &Url) -> Option<String> {
+    numbered_document_link(url)?;
+    let last = url.path_segments()?.rfind(|segment| !segment.is_empty())?;
+    let stem = last.split('.').next().unwrap_or(last);
+    let digits: String = stem
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+/// Whether a link sits under the document's own number, as `document_139545/…` does for
+/// document 139545, rather than under another record such as `document_audit_606299/…`.
+fn carries_number(url: &Url, number: &str) -> bool {
+    url.path_segments().is_some_and(|mut segments| {
+        segments.any(|segment| {
+            segment
+                .strip_suffix(number)
+                .is_some_and(|before| before.ends_with(['_', '-', '/']) || before.is_empty())
+        })
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2314,6 +2387,111 @@ mod reader_fix_tests {
         assert_eq!(
             files,
             ["https://zakazky.example.cz/document_download_101.html"]
+        );
+    }
+
+    #[test]
+    fn numbered_pages_know_their_number_and_slugged_names_are_files() {
+        let url = |path: &str| Url::parse(&format!("https://ezak.example.cz/{path}")).unwrap();
+        assert!(slugged_file(&url(
+            "document_139545/df58-vyzva-k-podani-nabidek_ga-pdf"
+        )));
+        assert!(slugged_file(&url("files/smlouva_docx")));
+        assert!(!slugged_file(&url("document_139545/")));
+        assert!(!slugged_file(&url("about-pdf.html")));
+        assert!(!slugged_file(&url("pdf")));
+        assert_eq!(
+            document_number(&url("document_download_139545.html")).as_deref(),
+            Some("139545")
+        );
+        assert_eq!(document_number(&url("contract_display_12722.html")), None);
+        let file = url("document_139545/df58-vyzva-pdf");
+        assert!(carries_number(&file, "139545"));
+        assert!(!carries_number(
+            &url("document_audit_606299/df58-vyzva-pdf"),
+            "139545"
+        ));
+        assert!(!carries_number(&url("document_1395450/x-pdf"), "139545"));
+    }
+
+    #[tokio::test]
+    async fn ezak_download_page_gives_its_own_file_when_recipe_selectors_find_nothing() {
+        let requests = Requests::default();
+        let page = |body: &'static str| HtmlBody(body).into_response();
+        let router = Router::new()
+            .route(
+                "/document_download_201.html",
+                get(move || async move {
+                    page(include_str!(
+                        "../tests/fixtures/ezak/document_download_201.html"
+                    ))
+                }),
+            )
+            .route(
+                "/document_201/a1b2c3-zadavaci-dokumentace-pdf",
+                get(|| async {
+                    (
+                        [
+                            (header::CONTENT_TYPE, "application/pdf"),
+                            (
+                                header::CONTENT_DISPOSITION,
+                                "attachment; filename*=UTF-8''Zad%C3%A1vac%C3%AD%20dokumentace.pdf",
+                            ),
+                        ],
+                        "%PDF-1.4 tender",
+                    )
+                }),
+            )
+            .fallback(
+                |uri: Uri| async move { (axum::http::StatusCode::NOT_FOUND, uri.to_string()) },
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                requests.clone(),
+                |State(requests): State<Requests>,
+                 request: axum::extract::Request,
+                 next: axum::middleware::Next| async move {
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push(request.uri().path().to_owned());
+                    next.run(request).await
+                },
+            ));
+        let base = serve(router).await;
+        // The learned recipe selects the download pages as document pages, then looks for
+        // files with selectors that match nothing on them.
+        let recipe: Recipe = serde_json::from_value(serde_json::json!({
+            "listing": "html", "items": "tr",
+            "document_page": {"path": "a.download-page", "attribute": "href"},
+            "documents": {"path": "a.file", "attribute": "href"}
+        }))
+        .unwrap();
+        let tender = Url::parse(&format!("{base}/contract_display_12722.html")).unwrap();
+        let attachments = Attachments {
+            pages: vec![Url::parse(&format!("{base}/document_download_201.html")).unwrap()],
+            ..Attachments::default()
+        };
+        let files = tempfile::tempdir().unwrap();
+        let http = Fetcher::new(files.path().into()).unwrap().portal(&tender);
+        let documents = attachment_files(
+            &http,
+            attachments,
+            &recipe,
+            Some(tender),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = documents.iter().map(|d| d.file_name.as_str()).collect();
+        assert_eq!(names, ["Zadávací dokumentace.pdf"]);
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            [
+                "/document_download_201.html",
+                "/document_201/a1b2c3-zadavaci-dokumentace-pdf"
+            ],
+            "the audit copy is not fetched"
         );
     }
 
