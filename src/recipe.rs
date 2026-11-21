@@ -42,7 +42,7 @@ const OCDS_THROTTLE_WAIT: u64 = 300;
 
 /// Days of releases an OCDS preset read asks for when its entry URL filters by date, so the
 /// read does not page through the publisher's whole history.
-const OCDS_WINDOW_DAYS: i64 = 90;
+pub(crate) const OCDS_WINDOW_DAYS: i64 = 90;
 
 /// More URLs than this in a sitemap would take too long to read at one request per second.
 const SITEMAP_PAGE_LIMIT: usize = 500;
@@ -987,6 +987,56 @@ fn ocds_window(url: &Url, now: chrono::DateTime<chrono::Utc>) -> (Url, bool) {
     let mut moved = url.clone();
     moved.query_pairs_mut().clear().extend_pairs(pairs);
     (moved, windowed)
+}
+
+/// A query parameter that limits an OCDS listing to a date range, as `ocds_window` reads one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DateFilter {
+    pub key: String,
+    /// Whether the parameter bounds the range's start (`updatedFrom`, `since`) or its end.
+    pub start: bool,
+    /// The `strftime` format the API was seen to accept for it.
+    pub format: &'static str,
+}
+
+/// The parameter `key` with an example `value` as a date filter, when the name ends like a range
+/// bound and the value is a date or date-time.
+pub(crate) fn date_filter(key: &str, value: &str) -> Option<DateFilter> {
+    let (bound, format) = date_bound(key).zip(date_format(value))?;
+    Some(DateFilter {
+        key: key.to_owned(),
+        start: bound == DateBound::Start,
+        format,
+    })
+}
+
+/// The date filters a URL's query carries.
+pub(crate) fn date_filters(url: &Url) -> Vec<DateFilter> {
+    url.query_pairs()
+        .filter_map(|(key, value)| date_filter(&key, &value))
+        .collect()
+}
+
+/// `url` with `filters` set to the window an OCDS preset read asks for at `now`. Parameters the
+/// URL already gives other values keep them; reads shift the dates again with `ocds_window`.
+pub(crate) fn with_date_window(
+    url: &Url,
+    filters: &[DateFilter],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Url {
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .into_owned()
+        .filter(|(key, _)| !filters.iter().any(|filter| filter.key == *key))
+        .collect();
+    pairs.extend(
+        filters
+            .iter()
+            .map(|filter| (filter.key.clone(), now.format(filter.format).to_string())),
+    );
+    let mut dated = url.clone();
+    dated.query_pairs_mut().clear().extend_pairs(pairs);
+    ocds_window(&dated, now).0
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2340,6 +2390,35 @@ mod reader_fix_tests {
             let url = Url::parse(other).unwrap();
             assert_eq!(ocds_window(&url, at(0)), (url, false));
         }
+    }
+
+    #[test]
+    fn date_window_is_added_to_an_entry_url_in_each_filter_format() {
+        let entry = Url::parse("https://portal.example/api/releases?stages=tender").unwrap();
+        let filters = [
+            date_filter("updatedFrom", "2020-12-31T23:00:00").unwrap(),
+            date_filter("updatedTo", "2020-12-31T23:00:00").unwrap(),
+        ];
+        assert!(filters[0].start && !filters[1].start);
+        let windowed = with_date_window(&entry, &filters, at(9));
+        assert_eq!(
+            windowed.as_str(),
+            "https://portal.example/api/releases?stages=tender\
+             &updatedFrom=2026-08-22T09%3A00%3A00&updatedTo=2026-11-20T09%3A00%3A00"
+        );
+        assert_eq!(date_filters(&windowed), filters);
+        // A read shifts the same parameters again.
+        assert_eq!(ocds_window(&windowed, at(9)), (windowed.clone(), true));
+
+        let bare = Url::parse("https://portal.example/api/releases").unwrap();
+        let since = [date_filter("since", "2025-01-01").unwrap()];
+        assert_eq!(
+            with_date_window(&bare, &since, at(0)).query(),
+            Some("since=2026-08-22")
+        );
+        assert!(date_filter("stages", "2025-01-01").is_none());
+        assert!(date_filter("updatedFrom", "yesterday").is_none());
+        assert!(date_filters(&entry).is_empty());
     }
 
     #[tokio::test]

@@ -11,6 +11,11 @@
 //! 4. for a thin app shell, verify public GET listing URLs advertised in same-origin bundles,
 //! 5. links to TED notices as evidence, and the usual HTML fallback when discovery succeeds.
 //!
+//! An OCDS API read without a date filter pages through its whole history. When an OCDS sample's
+//! `links.next` or the API documentation shows date parameters, one more GET confirms the entry
+//! URL with the read window added. That candidate goes first; the unfiltered one stays as
+//! evidence.
+//!
 //! Detection is generic: there are no per-portal rules, only platform conventions, so nothing
 //! depends on which portals are in the test set. Every request goes through the portal's rate-limited client. A login or
 //! CAPTCHA on the start page ends probing with `ReadFailure::Blocked`. A plain HTTP 403 on the
@@ -20,6 +25,7 @@ use crate::{
     domain::{ConnectionCandidate, ConnectionMethod, ReadFailure},
     fetch::{PortalHttp, Sample},
     formats,
+    recipe::{DateFilter, date_filter, date_filters, with_date_window},
 };
 use reqwest::Url;
 use scraper::{Html, Selector};
@@ -127,6 +133,8 @@ pub(crate) async fn probe_with<S: Source>(
         source,
         used: 0,
         candidates: Vec::new(),
+        unfiltered: Vec::new(),
+        documented: Vec::new(),
     }
     .run()
     .await
@@ -146,6 +154,10 @@ struct Probe<'a, S> {
     source: &'a S,
     used: usize,
     candidates: Vec<ConnectionCandidate>,
+    /// OCDS candidates without a date filter, with their sample's `links.next`, not yet windowed.
+    unfiltered: Vec<(Url, Option<String>)>,
+    /// Date parameters named by the API documentation read so far.
+    documented: Vec<DateFilter>,
 }
 
 impl<S: Source> Probe<'_, S> {
@@ -201,7 +213,10 @@ impl<S: Source> Probe<'_, S> {
                             }
                         }
                     }
-                    parsed => self.push_parsed(&sample, parsed, "start page", None),
+                    parsed => {
+                        self.push_parsed(&sample, parsed, "start page", None);
+                        self.date_windows().await;
+                    }
                 }
             }
             Some(Err(failure @ ReadFailure::Blocked(_))) => return Err(failure),
@@ -353,6 +368,7 @@ impl<S: Source> Probe<'_, S> {
                     "app-shell bundle GET",
                     None,
                 );
+                self.date_windows().await;
             }
         }
         Ok(post_search)
@@ -420,9 +436,13 @@ impl<S: Source> Probe<'_, S> {
         let Some(listing) = parsed.listing() else {
             return;
         };
+        let entry = entry.unwrap_or(&sample.url);
+        if listing.method == ConnectionMethod::Ocds && date_filters(entry).is_empty() {
+            self.unfiltered.push((entry.clone(), listing.next.clone()));
+        }
         self.push(ConnectionCandidate {
             method: listing.method,
-            entry_url: entry.unwrap_or(&sample.url).to_string(),
+            entry_url: entry.to_string(),
             found_via: found_via.into(),
             http_status: sample.status,
             content_type: sample.content_type.clone(),
@@ -443,6 +463,7 @@ impl<S: Source> Probe<'_, S> {
                     return Some(sample);
                 }
                 self.push_parsed(&sample, parsed, lead.found_via, None);
+                self.date_windows().await;
             }
             // A refused route is still evidence for the decision; a blocked or flaky one is not.
             Err(failure) => {
@@ -469,12 +490,15 @@ impl<S: Source> Probe<'_, S> {
     /// preferring one about OCDS releases or notices.
     async fn api_documentation(&mut self, page: &Sample) {
         let mut endpoints = api_endpoints(&page.url, &page.body);
+        self.documented.extend(documented_date_filters(&page.body));
         if endpoints.is_empty()
             && let Some(subpage) = documentation_subpage(&page.url, &page.body)
             && let Some(Ok(sample)) = self.fetch(subpage).await
             && parse_body(&sample.body, sample.content_type.as_deref()) == Parsed::Html
         {
             endpoints = api_endpoints(&sample.url, &sample.body);
+            self.documented
+                .extend(documented_date_filters(&sample.body));
         }
         for url in endpoints.into_iter().take(MAX_DOC_ENDPOINTS) {
             let hint = Some(json_hint(&url));
@@ -484,6 +508,60 @@ impl<S: Source> Probe<'_, S> {
                 hint,
             })
             .await;
+        }
+    }
+
+    /// For each new OCDS candidate without a date filter, adds the read window to its entry URL
+    /// when its `links.next` or the API documentation shows date parameters. One GET confirms
+    /// that the windowed URL answers with an OCDS package; that candidate is placed before the
+    /// unfiltered one, which stays as evidence. Without such parameters nothing changes.
+    async fn date_windows(&mut self) {
+        for (entry, next) in std::mem::take(&mut self.unfiltered) {
+            let echoed = next
+                .and_then(|next| entry.join(&next).ok())
+                .map(|next| date_filters(&next))
+                .filter(|filters| filters.iter().any(|filter| filter.start));
+            let (filters, source) = match echoed {
+                Some(filters) => (filters, "links.next"),
+                None => (window_filters(&self.documented), "API documentation"),
+            };
+            if filters.is_empty() {
+                continue;
+            }
+            let windowed = with_date_window(&entry, &filters, chrono::Utc::now());
+            let Some(Ok(sample)) = self.fetch(windowed).await else {
+                continue;
+            };
+            let Parsed::Listing(listing) = parse_body(&sample.body, sample.content_type.as_deref())
+            else {
+                continue;
+            };
+            let Some(at) = self.candidates.iter().position(|candidate| {
+                candidate.method == ConnectionMethod::Ocds && candidate.entry_url == entry.as_str()
+            }) else {
+                continue;
+            };
+            if listing.method != ConnectionMethod::Ocds || listing.items == 0 {
+                continue;
+            }
+            let found_via = format!(
+                "{} with date window from {source}",
+                self.candidates[at].found_via
+            );
+            self.candidates.insert(
+                at,
+                ConnectionCandidate {
+                    method: ConnectionMethod::Ocds,
+                    entry_url: sample.url.to_string(),
+                    found_via,
+                    http_status: sample.status,
+                    content_type: sample.content_type.clone(),
+                    sample_items: listing.items,
+                    fields_seen: listing.fields,
+                    has_pagination: listing.has_pagination,
+                    score: 0.0,
+                },
+            );
         }
     }
 
@@ -560,6 +638,88 @@ impl<S: Source> Probe<'_, S> {
     }
 }
 
+/// Date parameters an API documentation page names: query parameters with a date value in its
+/// code samples, then bare parameter names such as `updatedFrom` or `since`. Bare names take the
+/// format of the first code sample's date, or an RFC 3339 UTC date-time without one.
+fn documented_date_filters(body: &str) -> Vec<DateFilter> {
+    let text = body.replace("&amp;", "&");
+    let name_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices(['?', '&']) {
+        let Some((key, tail)) = text[at + 1..].split_once('=') else {
+            continue;
+        };
+        if key.is_empty() || !key.chars().all(name_char) {
+            continue;
+        }
+        let value: String = tail
+            .chars()
+            .take_while(|&c| c.is_ascii_alphanumeric() || "-:.+%".contains(c))
+            .collect();
+        let value = value.replace("%3A", ":").replace("%3a", ":");
+        found.extend(date_filter(key, &value));
+    }
+    let format = found.first().map(|filter: &DateFilter| filter.format);
+    for word in text.split(|c: char| !name_char(c)) {
+        if documented_date_name(word)
+            && !found.iter().any(|filter| filter.key == word)
+            && let Some(mut filter) = date_filter(word, "2000-01-01T00:00:00Z")
+        {
+            filter.format = format.unwrap_or(filter.format);
+            found.push(filter);
+        }
+    }
+    found
+}
+
+/// A parameter name that reads as a release date bound: `since`, or a date word such as
+/// `updated` or `published` followed by a bound such as `From` or `To`.
+fn documented_date_name(word: &str) -> bool {
+    let name = word.to_ascii_lowercase().replace('_', "");
+    let prefixes = [
+        "updated",
+        "published",
+        "modified",
+        "changed",
+        "released",
+        "release",
+        "date",
+        "lastupdated",
+        "lastmodified",
+    ];
+    let bounds = ["from", "to", "since", "after", "before", "until"];
+    name == "since"
+        || prefixes.iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|bound| bounds.contains(&bound))
+        })
+}
+
+/// One start filter from `found` and the end filter of the same family, if any. The first start
+/// bound wins, so values seen in code samples beat bare names.
+fn window_filters(found: &[DateFilter]) -> Vec<DateFilter> {
+    let family = |key: &str| {
+        let key = key.to_ascii_lowercase().replace(['_', '-'], "");
+        [
+            "from", "since", "after", "start", "to", "until", "before", "end",
+        ]
+        .iter()
+        .find_map(|bound| key.strip_suffix(bound).map(str::to_owned))
+        .unwrap_or(key)
+    };
+    let Some(start) = found.iter().find(|filter| filter.start) else {
+        return Vec::new();
+    };
+    let mut chosen = vec![start.clone()];
+    chosen.extend(
+        found
+            .iter()
+            .find(|filter| !filter.start && family(&filter.key) == family(&start.key))
+            .cloned(),
+    );
+    chosen
+}
+
 /// What a fetched body turned out to be.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Parsed {
@@ -574,6 +734,8 @@ pub(crate) struct Listing {
     pub items: usize,
     pub fields: Vec<String>,
     pub has_pagination: bool,
+    /// An OCDS package's `links.next`, whose query shows the filters the API understands.
+    pub next: Option<String>,
 }
 
 impl Parsed {
@@ -616,6 +778,7 @@ pub(crate) fn parse_body(body: &str, content_type: Option<&str>) -> Parsed {
             items: count_notice_urls(&map.urls),
             fields: Vec::new(),
             has_pagination: map.sitemaps.len() > 1,
+            next: None,
         });
     }
     if content_type.contains("html") || head.contains("<body") {
@@ -654,6 +817,7 @@ fn json_listing(value: &Value) -> Option<Listing> {
             items: page.tenders.len(),
             fields: ordered(names),
             has_pagination: page.next.is_some(),
+            next: page.next,
         });
     }
     let items = items_array(value, 0)?;
@@ -666,6 +830,7 @@ fn json_listing(value: &Value) -> Option<Listing> {
         items: items.len(),
         fields: ordered(names),
         has_pagination: json_pagination(value, items.len()),
+        next: None,
     })
 }
 
@@ -979,6 +1144,7 @@ fn feed_listing(body: &str) -> Option<Listing> {
         items: feed.entries.len(),
         fields: ordered(names),
         has_pagination: feed.next.is_some(),
+        next: None,
     })
 }
 
@@ -1422,10 +1588,18 @@ mod tests {
     #[derive(Default)]
     struct Canned {
         pages: HashMap<String, Result<(&'static str, String), ReadFailure>>,
+        /// Answers for a URL whatever its query, when no exact page matches.
+        any_query: HashMap<String, (&'static str, String)>,
         requests: Mutex<Vec<String>>,
     }
 
     impl Canned {
+        fn any_query(mut self, url: &str, content_type: &'static str, body: &str) -> Self {
+            self.any_query
+                .insert(url.into(), (content_type, body.into()));
+            self
+        }
+
         fn page(mut self, url: &str, content_type: &'static str, body: impl Into<String>) -> Self {
             self.pages
                 .insert(url.into(), Ok((content_type, body.into())));
@@ -1448,6 +1622,18 @@ mod tests {
         }
         async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
             self.requests.lock().unwrap().push(url.to_string());
+            let mut bare = url.clone();
+            bare.set_query(None);
+            if !self.pages.contains_key(url.as_str())
+                && let Some((content_type, body)) = self.any_query.get(bare.as_str())
+            {
+                return Ok(Sample {
+                    url,
+                    status: 200,
+                    content_type: Some((*content_type).into()),
+                    body: body.clone(),
+                });
+            }
             match self.pages.get(url.as_str()) {
                 Some(Ok((content_type, body))) => Ok(Sample {
                     url,
@@ -2071,6 +2257,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn documented_date_parameters_pair_a_start_with_its_end() {
+        let body = r#"<pre>GET /api/releases?limit=50&amp;publishedFrom=2021-01-01</pre>
+            <p>Filter with <code>updatedFrom</code>, <code>updated_to</code> or
+            <code>publishedTo</code>. Timestamps to the second.</p>"#;
+        let found = documented_date_filters(body);
+        let keys: Vec<_> = found.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["publishedFrom", "updatedFrom", "updated_to", "publishedTo"]
+        );
+        assert!(found.iter().all(|filter| filter.format == "%Y-%m-%d"));
+        let chosen: Vec<_> = window_filters(&found)
+            .into_iter()
+            .map(|filter| (filter.key, filter.start))
+            .collect();
+        assert_eq!(
+            chosen,
+            [
+                ("publishedFrom".into(), true),
+                ("publishedTo".into(), false)
+            ]
+        );
+
+        let since = documented_date_filters("<p>Pass <code>since</code> for changes.</p>");
+        assert_eq!(window_filters(&since).len(), 1);
+        assert_eq!(since[0].format, "%Y-%m-%dT%H:%M:%SZ");
+        assert!(documented_date_filters("<p>From photo to video.</p>").is_empty());
+        assert!(window_filters(&documented_date_filters("<code>updatedTo</code>")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn documented_date_parameters_window_an_unfiltered_ocds_entry() {
+        let start = "https://www.portal.example/Search";
+        let endpoint = "https://www.portal.example/api/v2/releases";
+        let source = Canned::default()
+            .page(
+                start,
+                "text/html",
+                r#"<html><body><a href="/notice/1">Notice</a>
+                <footer><a href="/developer/api">Data and API</a></footer></body></html>"#,
+            )
+            .page(
+                "https://www.portal.example/developer/api",
+                "text/html",
+                r#"<html><body><pre>GET /api/v2/releases?publishedFrom=2021-01-01&amp;limit=50</pre>
+                <p>End the range with <code>publishedTo</code>.</p></body></html>"#,
+            )
+            .page(endpoint, "application/json", OCDS)
+            .any_query(endpoint, "application/json", OCDS);
+        let candidates = probe_with(&url(start), &source).await.unwrap();
+        assert_eq!(
+            methods(&candidates),
+            [
+                ConnectionMethod::Ocds,
+                ConnectionMethod::Ocds,
+                ConnectionMethod::Html
+            ]
+        );
+        let windowed = url(&candidates[0].entry_url);
+        assert_eq!(windowed.path(), "/api/v2/releases");
+        let query: std::collections::BTreeMap<String, String> =
+            windowed.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.keys().collect::<Vec<_>>(),
+            ["publishedFrom", "publishedTo"]
+        );
+        let day = |value: &str| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap();
+        assert_eq!(
+            day(&query["publishedTo"]) - day(&query["publishedFrom"]),
+            chrono::Duration::days(crate::recipe::OCDS_WINDOW_DAYS)
+        );
+        assert_eq!(
+            candidates[0].found_via,
+            "API documentation with date window from API documentation"
+        );
+        assert_eq!(candidates[1].entry_url, endpoint);
+        assert_eq!(candidates[1].found_via, "API documentation");
+        let ranked = crate::discovery::rank(candidates.clone());
+        assert_eq!(ranked[0].entry_url, candidates[0].entry_url);
+        assert!(source.requested().len() <= REQUEST_BUDGET);
+    }
+
     /// The real client against a local server: gzip sitemaps are unpacked by `PortalHttp`, and
     /// a CAPTCHA page is reported as a block.
     mod over_http {
@@ -2309,6 +2578,99 @@ mod tests {
                 candidates[0].content_type.as_deref(),
                 Some("application/xml")
             );
+        }
+
+        /// A local OCDS API at `/api/releases` that answers every request with `body` and
+        /// records each query.
+        async fn ocds_api(
+            body: &'static str,
+        ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+            let queries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = queries.clone();
+            let router = Router::new().route(
+                "/api/releases",
+                get(
+                    move |axum::extract::RawQuery(query): axum::extract::RawQuery| {
+                        let seen = seen.clone();
+                        async move {
+                            seen.lock().unwrap().push(query.unwrap_or_default());
+                            ([(header::CONTENT_TYPE, "application/json")], body)
+                        }
+                    },
+                ),
+            );
+            (serve(router).await, queries)
+        }
+
+        #[tokio::test]
+        async fn ocds_next_link_dates_window_the_entry_url() {
+            let (base, queries) =
+                ocds_api(include_str!("../../tests/fixtures/ocds/window_page1.json")).await;
+            let start = url(&format!("{base}/api/releases"));
+            let files = tempfile::tempdir().unwrap();
+            let http = Fetcher::new(files.path().into()).unwrap().portal(&start);
+            let candidates = probe(&start, &http).await.unwrap();
+            assert_eq!(
+                methods(&candidates),
+                [
+                    ConnectionMethod::Ocds,
+                    ConnectionMethod::Ocds,
+                    ConnectionMethod::Html
+                ]
+            );
+            let windowed = url(&candidates[0].entry_url);
+            assert_eq!(windowed.path(), "/api/releases");
+            let query: std::collections::BTreeMap<String, String> =
+                windowed.query_pairs().into_owned().collect();
+            assert_eq!(
+                query.keys().collect::<Vec<_>>(),
+                ["updatedFrom", "updatedTo"]
+            );
+            let time = |value: &str| {
+                chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").unwrap()
+            };
+            assert_eq!(
+                time(&query["updatedTo"]) - time(&query["updatedFrom"]),
+                chrono::Duration::days(crate::recipe::OCDS_WINDOW_DAYS)
+            );
+            assert_eq!(
+                candidates[0].found_via,
+                "start page with date window from links.next"
+            );
+            assert_eq!(
+                (candidates[0].http_status, candidates[0].sample_items),
+                (200, 2)
+            );
+            // The unfiltered entry stays as evidence, after the windowed one.
+            assert_eq!(candidates[1].entry_url, start.as_str());
+            assert_eq!(candidates[1].found_via, "start page");
+            let queries = queries.lock().unwrap().clone();
+            assert_eq!(queries.len(), 2, "{queries:?}");
+            assert_eq!(queries[0], "");
+            assert_eq!(Some(queries[1].as_str()), windowed.query());
+
+            let ranked = crate::discovery::rank_for(&start, candidates.clone());
+            assert_eq!(ranked[0].entry_url, windowed.as_str());
+            assert!(ranked[0].score > ranked[1].score);
+            let recipe = crate::recipe::Recipe::preset(&ranked[0]).unwrap();
+            assert_eq!(recipe.start_url.as_deref(), Some(windowed.as_str()));
+        }
+
+        #[tokio::test]
+        async fn ocds_without_date_parameters_keeps_its_entry_url() {
+            let (base, queries) =
+                ocds_api(include_str!("../../tests/fixtures/ocds/undated_page1.json")).await;
+            let start = url(&format!("{base}/api/releases"));
+            let files = tempfile::tempdir().unwrap();
+            let http = Fetcher::new(files.path().into()).unwrap().portal(&start);
+            let candidates = probe(&start, &http).await.unwrap();
+            assert_eq!(
+                methods(&candidates),
+                [ConnectionMethod::Ocds, ConnectionMethod::Html]
+            );
+            assert_eq!(candidates[0].entry_url, start.as_str());
+            assert_eq!(candidates[0].found_via, "start page");
+            assert_eq!(*queries.lock().unwrap(), [""]);
         }
 
         #[tokio::test]
