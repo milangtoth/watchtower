@@ -3,7 +3,7 @@ use crate::{
         CandidateRead, ConnectionCandidate, ConnectionMethod, Document, Evidence, Nature, Place,
         Procedure, ReadFailure, Tender, TenderStatus,
     },
-    fetch::{DocumentResponse, Page, PortalHttp, public_http},
+    fetch::{DocumentResponse, Page, PortalHttp, public_http, unavailable_note},
     formats, metadata,
 };
 use anyhow::{Context, Result, ensure};
@@ -464,6 +464,114 @@ struct ListingLinks {
 
 const UNFOLLOWED_LINK_LIMIT: usize = 20;
 
+/// Notes kept per read on skipped documents.
+const SKIPPED_NOTE_LIMIT: usize = 20;
+
+/// Documents a read left out, and how many document links it tried.
+///
+/// Files over the brief's size limits are allowed and never count against the read. A link
+/// that failed on its own (an HTTP error, an unreadable archive, a timeout after a retry, a
+/// login or CAPTCHA in front of one file) is skipped too, unless such failures make up most of
+/// the read's file links: then the document route is broken rather than one file, and `check`
+/// fails the read. When most links are behind a login or CAPTCHA, the read fails as blocked,
+/// because that prevents delivery.
+#[derive(Debug, Default)]
+pub(crate) struct SkippedDocuments {
+    /// One note per skipped file, up to `SKIPPED_NOTE_LIMIT`.
+    notes: Vec<String>,
+    /// Every skipped file: over a size limit or unavailable.
+    count: usize,
+    /// File links that failed on their own.
+    unavailable: usize,
+    /// The first three of those failures, quoted when they fail the read.
+    failures: Vec<String>,
+    /// Of `unavailable`, links that failed with a temporary error such as a timeout.
+    temporary: usize,
+    /// Of `unavailable`, links behind a login or CAPTCHA.
+    blocked: usize,
+    /// The first three of the blocked links, quoted when they fail the read.
+    blockers: Vec<String>,
+    /// File links that answered with files or failed. Links that led to pages are not counted.
+    attempted: usize,
+}
+
+impl SkippedDocuments {
+    fn note(&mut self, note: String) {
+        self.count += 1;
+        if self.notes.len() < SKIPPED_NOTE_LIMIT {
+            self.notes.push(note);
+        }
+    }
+
+    fn unavailable(&mut self, note: String, cause: LinkFailure) {
+        self.attempted += 1;
+        self.unavailable += 1;
+        match cause {
+            LinkFailure::File => {}
+            LinkFailure::Temporary => self.temporary += 1,
+            LinkFailure::Blocked => {
+                self.blocked += 1;
+                if self.blockers.len() < 3 {
+                    self.blockers.push(note.clone());
+                }
+            }
+        }
+        if self.failures.len() < 3 {
+            self.failures.push(note.clone());
+        }
+        self.note(note);
+    }
+
+    /// The reason a read with these failures is broken, or `None` while they are single bad
+    /// files. Like the worker's rule for vanished tenders, it needs at least two failed links
+    /// and more than half of the links tried. Links behind a login or CAPTCHA that make up more
+    /// than half of the links tried block delivery, even when there is only one.
+    fn broken(&self) -> Option<ReadFailure> {
+        if self.blocked * 2 > self.attempted {
+            return Some(ReadFailure::Blocked(format!(
+                "{} of {} document links are behind a login or CAPTCHA: {}",
+                self.blocked,
+                self.attempted,
+                self.blockers.join("; ")
+            )));
+        }
+        if self.unavailable < 2 || self.unavailable * 2 <= self.attempted {
+            return None;
+        }
+        let reason = format!(
+            "{} of {} document links failed, so the document route looks broken rather than single files: {}",
+            self.unavailable,
+            self.attempted,
+            self.failures.join("; ")
+        );
+        Some(if self.temporary == self.unavailable {
+            ReadFailure::Temporary(reason)
+        } else {
+            ReadFailure::Incomplete(reason)
+        })
+    }
+
+    /// Fails the read when the failures point to a broken document route.
+    fn check(&self) -> Result<(), ReadFailure> {
+        self.broken().map_or(Ok(()), Err)
+    }
+}
+
+/// Why a document link was skipped, for the rule that decides whether the read broke.
+#[derive(Clone, Copy, Debug)]
+enum LinkFailure {
+    /// The file itself failed, such as HTTP 404 or an unreadable archive.
+    File,
+    /// A timeout or server error that a retry did not clear.
+    Temporary,
+    /// A login or CAPTCHA in front of the file.
+    Blocked,
+}
+
+/// Temporary document failures after which a read stops early when most links tried so far
+/// failed, so an unreachable file host does not cost one timeout per tender.
+const TEMPORARY_DOCUMENT_STOP: usize = 3;
+
 pub async fn read(
     http: &PortalHttp,
     portal_url: &Url,
@@ -486,7 +594,7 @@ pub async fn read(
     let mut pagination_links = Vec::new();
     let mut listing_rows = Vec::new();
     let mut samples = Vec::new();
-    let mut skipped_documents = Vec::new();
+    let mut skipped_documents = SkippedDocuments::default();
     let mut skipped_rows = 0;
     let mut total = None;
     let mut empty_state = false;
@@ -676,6 +784,7 @@ pub async fn read(
         document_count += tender.documents.len();
         tenders.push(tender);
     }
+    skipped_documents.check()?;
     Ok(CandidateRead {
         tenders,
         evidence: Evidence {
@@ -686,7 +795,8 @@ pub async fn read(
             total,
             empty_state,
             document_count,
-            skipped_documents,
+            skipped_document_count: skipped_documents.count,
+            skipped_documents: skipped_documents.notes,
             skipped_rows,
             listing_pages,
             unfollowed_links,
@@ -1399,10 +1509,8 @@ async fn attachment_files(
     recipe: &Recipe,
     referrer: Option<Url>,
     samples: &mut Vec<String>,
-    skipped_documents: &mut Vec<String>,
+    skipped_documents: &mut SkippedDocuments,
 ) -> Result<Vec<Document>, ReadFailure> {
-    /// Notes kept per read on files skipped over a size limit.
-    const SKIPPED_NOTE_LIMIT: usize = 20;
     const MAX_PAGES: usize = 32;
     const MAX_DEPTH: usize = 3;
     let queue = |urls: Vec<Url>, depth, source, referrer: &Option<Url>, scope: Option<&str>| {
@@ -1434,6 +1542,8 @@ async fn attachment_files(
     let mut page_files = HashSet::new();
     let mut documents = Vec::new();
     let mut fetched = 0;
+    // Notes on this tender's file links that answered with a login or CAPTCHA.
+    let mut gated = Vec::new();
     // Attachment pages that offered onward links.
     let mut linked_pages = 0;
     while let Some((link, is_page)) = pages
@@ -1461,15 +1571,49 @@ async fn attachment_files(
             (page, link.depth)
         } else {
             visited.insert(link.url.clone());
-            match http.documents(link.url.clone()).await? {
+            let response = match http.documents(link.url.clone()).await {
+                Err(ReadFailure::Temporary(reason)) => {
+                    tracing::warn!(location = %location(&link.url), reason, "Retrying document");
+                    http.documents(link.url.clone()).await
+                }
+                response => response,
+            };
+            let response = match response {
+                Err(ReadFailure::Blocked(reason)) => {
+                    let note = unavailable_note(&link.url, &reason);
+                    if gated.len() < 3 {
+                        gated.push(note.clone());
+                    }
+                    skipped_documents.unavailable(note, LinkFailure::Blocked);
+                    continue;
+                }
+                Err(ReadFailure::Temporary(reason)) => {
+                    skipped_documents
+                        .unavailable(unavailable_note(&link.url, &reason), LinkFailure::Temporary);
+                    if skipped_documents.temporary >= TEMPORARY_DOCUMENT_STOP
+                        && let Some(failure) = skipped_documents.broken()
+                    {
+                        return Err(failure);
+                    }
+                    continue;
+                }
+                response => response?,
+            };
+            match response {
                 DocumentResponse::Files {
                     documents: result,
                     skipped,
                 } => {
                     downloaded.insert(link.url);
                     documents.extend(result);
-                    let room = SKIPPED_NOTE_LIMIT.saturating_sub(skipped_documents.len());
-                    skipped_documents.extend(skipped.into_iter().take(room));
+                    skipped_documents.attempted += 1;
+                    for note in skipped {
+                        skipped_documents.note(note);
+                    }
+                    continue;
+                }
+                DocumentResponse::Unavailable(note) => {
+                    skipped_documents.unavailable(note, LinkFailure::File);
                     continue;
                 }
                 DocumentResponse::Html(page) => {
@@ -1542,6 +1686,14 @@ async fn attachment_files(
         }
     }
     if linked_pages > 0 && page_files.is_disjoint(&downloaded) {
+        // No file of this tender could be delivered. When a login or CAPTCHA is in front of
+        // them, that blocks delivery rather than pointing to a broken recipe.
+        if !gated.is_empty() {
+            return Err(ReadFailure::Blocked(format!(
+                "No file on a tender's attachment pages could be delivered, and its files are behind a login or CAPTCHA: {}",
+                gated.join("; ")
+            )));
+        }
         return Err(ReadFailure::Incomplete(
             "Attachment pages did not lead to any file links".into(),
         ));
@@ -2687,7 +2839,7 @@ mod reader_fix_tests {
             &recipe,
             Some(tender),
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut SkippedDocuments::default(),
         )
         .await
         .unwrap();
@@ -2829,7 +2981,7 @@ mod reader_fix_tests {
             &recipe,
             Some(detail.url.clone()),
             &mut samples,
-            &mut Vec::new(),
+            &mut SkippedDocuments::default(),
         )
         .await
         .unwrap();
@@ -2853,10 +3005,16 @@ mod reader_fix_tests {
             fallback: true,
             ..Attachments::default()
         };
-        let documents =
-            attachment_files(&http, empty, &recipe, None, &mut samples, &mut Vec::new())
-                .await
-                .unwrap();
+        let documents = attachment_files(
+            &http,
+            empty,
+            &recipe,
+            None,
+            &mut samples,
+            &mut SkippedDocuments::default(),
+        )
+        .await
+        .unwrap();
         assert!(documents.is_empty());
     }
 
@@ -3386,5 +3544,108 @@ mod continuation_row_tests {
         );
         let error = parse(&broken).err().unwrap().to_string();
         assert!(error.contains("lost its detail link"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod skipped_document_tests {
+    use super::*;
+
+    fn tally(ok: usize, failed: usize, temporary: usize) -> SkippedDocuments {
+        let mut skipped = SkippedDocuments::default();
+        skipped.attempted += ok;
+        for index in 0..failed {
+            skipped.unavailable(
+                format!("f{index}.pdf: skipped, portal returned HTTP 404"),
+                LinkFailure::File,
+            );
+        }
+        for index in 0..temporary {
+            skipped.unavailable(
+                format!("t{index}.pdf: skipped, timed out"),
+                LinkFailure::Temporary,
+            );
+        }
+        skipped
+    }
+
+    fn gated(skipped: &mut SkippedDocuments, count: usize) {
+        for index in 0..count {
+            skipped.unavailable(
+                format!("g{index}.pdf: skipped, portal requires a login"),
+                LinkFailure::Blocked,
+            );
+        }
+    }
+
+    #[test]
+    fn one_gated_file_among_many_is_skipped() {
+        let mut skipped = tally(2, 0, 0);
+        gated(&mut skipped, 1);
+        assert!(skipped.check().is_ok());
+        assert_eq!(skipped.count, 1);
+    }
+
+    #[test]
+    fn mostly_gated_documents_block_delivery() {
+        let mut skipped = tally(1, 0, 0);
+        gated(&mut skipped, 2);
+        let failure = skipped.check().unwrap_err();
+        assert!(
+            matches!(&failure, ReadFailure::Blocked(reason)
+            if reason.starts_with("2 of 3 document links are behind a login or CAPTCHA")
+                && reason.contains("g0.pdf: skipped, portal requires a login")),
+            "{failure}"
+        );
+
+        let mut only = SkippedDocuments::default();
+        gated(&mut only, 1);
+        assert!(
+            matches!(only.check(), Err(ReadFailure::Blocked(_))),
+            "the only file is gated"
+        );
+    }
+
+    #[test]
+    fn single_bad_files_are_skipped() {
+        assert!(tally(0, 1, 0).check().is_ok(), "one failed link of one");
+        assert!(tally(2, 2, 0).check().is_ok(), "half of the links");
+        assert!(tally(200, 30, 5).check().is_ok());
+    }
+
+    #[test]
+    fn most_links_failing_is_a_break() {
+        let failure = tally(1, 2, 0).check().unwrap_err();
+        assert!(
+            matches!(&failure, ReadFailure::Incomplete(reason)
+            if reason.starts_with("2 of 3 document links failed")),
+            "{failure}"
+        );
+        assert!(matches!(
+            tally(0, 3, 0).check(),
+            Err(ReadFailure::Incomplete(_))
+        ));
+    }
+
+    #[test]
+    fn only_timeouts_failing_is_temporary() {
+        assert!(matches!(
+            tally(0, 0, 3).check(),
+            Err(ReadFailure::Temporary(_))
+        ));
+        assert!(matches!(
+            tally(0, 1, 2).check(),
+            Err(ReadFailure::Incomplete(_))
+        ));
+    }
+
+    #[test]
+    fn size_limit_skips_never_count_as_failures() {
+        let mut skipped = tally(1, 0, 0);
+        for _ in 0..5 {
+            skipped.note("big.pdf: skipped, larger than the 250 MB file limit".into());
+        }
+        assert!(skipped.check().is_ok());
+        assert_eq!(skipped.count, 5);
     }
 }

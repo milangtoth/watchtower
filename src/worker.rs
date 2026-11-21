@@ -1365,6 +1365,7 @@ mod tests {
                 empty_state: false,
                 document_count: 0,
                 skipped_documents: Vec::new(),
+                skipped_document_count: 0,
                 skipped_rows: 0,
                 listing_pages: pages.iter().map(|page| page.to_string()).collect(),
                 unfollowed_links: Vec::new(),

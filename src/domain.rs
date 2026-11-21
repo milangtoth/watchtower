@@ -153,10 +153,15 @@ pub struct Evidence {
     pub total: Option<usize>,
     pub empty_state: bool,
     pub document_count: usize,
-    /// Documents and ZIP members left out because they passed the brief's size limits: 250 MB
-    /// per file and 1 GB expanded per archive. Files within the limits are still delivered.
+    /// Notes, at most 20, on documents and ZIP members the read left out: files past the
+    /// brief's size limits (250 MB per file, 1 GB expanded per archive), and single files that
+    /// failed on their own, such as HTTP 404, an unreadable archive or a timeout. The other
+    /// files are still delivered.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped_documents: Vec<String>,
+    /// How many documents were skipped in all, including those beyond the notes.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_document_count: usize,
     /// HTML listing rows skipped because they had neither a detail link nor a list field,
     /// such as a table's header and pagination rows.
     #[serde(skip_serializing_if = "is_zero")]

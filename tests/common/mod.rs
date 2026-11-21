@@ -451,7 +451,26 @@ pub async fn serve(site: Site) -> (String, tokio::task::JoinHandle<std::io::Resu
         .route(
             "/files/{name}",
             get(|Path(name): Path<String>| async move {
-                ([(header::CONTENT_TYPE, "application/pdf")], file_bytes(&name))
+                // Single bad files, as real portals have them: a dead link, a file behind a
+                // login, and an archive cut short before its central directory.
+                if name.starts_with("gone-") {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                if name.starts_with("login-") {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Html("<title>Sign in</title><form><input type=\"password\"></form>"),
+                    )
+                        .into_response();
+                }
+                if name.starts_with("corrupt-") {
+                    return (
+                        [(header::CONTENT_TYPE, "application/zip")],
+                        b"PK truncated archive".to_vec(),
+                    )
+                        .into_response();
+                }
+                ([(header::CONTENT_TYPE, "application/pdf")], file_bytes(&name)).into_response()
             }),
         )
         .with_state(site);
@@ -622,7 +641,19 @@ impl PortalModel for Auditor {
                 .map(|d| d.file_name.as_str())
                 .collect();
             files.sort_unstable();
-            let mut expected = row.files.clone();
+            // Like the production audit, files the read reports as skipped are not missing.
+            let mut expected: Vec<_> = row
+                .files
+                .iter()
+                .copied()
+                .filter(|name| {
+                    !candidate
+                        .evidence
+                        .skipped_documents
+                        .iter()
+                        .any(|note| note.starts_with(&format!("{name}:")))
+                })
+                .collect();
             expected.sort_unstable();
             if tender.title.as_deref() != Some(row.title)
                 || tender.buyer_name.as_deref() != Some(row.buyer)

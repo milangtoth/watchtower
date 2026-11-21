@@ -298,6 +298,10 @@ pub(crate) enum DocumentResponse {
         skipped: Vec<String>,
     },
     Html(Page),
+    /// The link failed on its own: an HTTP error such as 404, a redirect loop, or an archive
+    /// that cannot be read. The note names the file and the cause. The read decides whether
+    /// the failures add up to a broken document route.
+    Unavailable(String),
 }
 
 impl DocumentResponse {
@@ -308,6 +312,28 @@ impl DocumentResponse {
             skipped: vec![note],
         }
     }
+
+    fn unavailable(note: String) -> Self {
+        tracing::warn!(note, "Document unavailable");
+        Self::Unavailable(note)
+    }
+}
+
+/// The note for a document link that failed on its own, such as
+/// `notice.pdf: skipped, portal returned HTTP 404`.
+pub(crate) fn unavailable_note(url: &Url, reason: &str) -> String {
+    let name = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(url.as_str());
+    let name: String = name.chars().take(120).collect();
+    let mut reason = reason.chars();
+    let reason = reason
+        .next()
+        .map(|first| first.to_lowercase().chain(reason).collect::<String>())
+        .unwrap_or_default();
+    format!("{name}: skipped, {reason}")
 }
 
 impl Fetcher {
@@ -698,8 +724,19 @@ impl PortalHttp {
         Ok(Page { url, body })
     }
 
+    /// Downloads one document link. A failure that concerns only this file, such as HTTP 404
+    /// or an unreadable archive, is `DocumentResponse::Unavailable`. Logins, access pages,
+    /// throttling, transport errors and local staging errors stay errors.
     pub(crate) async fn documents(&self, url: Url) -> Result<DocumentResponse, ReadFailure> {
-        let mut response = self.request(url, "document headers").await?;
+        let mut response = match self.request(url.clone(), "document headers").await {
+            Ok(response) => response,
+            Err(ReadFailure::Incomplete(reason)) => {
+                return Ok(DocumentResponse::unavailable(unavailable_note(
+                    &url, &reason,
+                )));
+            }
+            Err(failure) => return Err(failure),
+        };
         let content_type = response
             .content_type()
             .unwrap_or_default()
@@ -751,7 +788,8 @@ impl PortalHttp {
         let archive = name.to_ascii_lowercase().ends_with(".zip")
             || content_type.contains("application/zip")
             || (!name.contains('.') && magic.starts_with(b"PK\x03\x04"));
-        tokio::task::spawn_blocking(move || {
+        let archive_name = name.clone();
+        let unpacked = tokio::task::spawn_blocking(move || {
             if archive {
                 unpack(temp.path(), &directory, &name, UnpackLimits::default())
             } else {
@@ -763,17 +801,24 @@ impl PortalHttp {
             }
         })
         .await
-        .map_err(file_error)?
-        .map(|unpacked| {
-            for note in &unpacked.skipped {
-                tracing::warn!(note, "Archive member skipped");
+        .map_err(file_error)?;
+        match unpacked {
+            Ok(unpacked) => {
+                for note in &unpacked.skipped {
+                    tracing::warn!(note, "Archive member skipped");
+                }
+                Ok(DocumentResponse::Files {
+                    documents: unpacked.documents,
+                    skipped: unpacked.skipped,
+                })
             }
-            DocumentResponse::Files {
-                documents: unpacked.documents,
-                skipped: unpacked.skipped,
-            }
-        })
-        .map_err(file_error)
+            Err(error) => match error.downcast_ref::<UnreadableArchive>() {
+                Some(cause) => Ok(DocumentResponse::unavailable(format!(
+                    "{archive_name}: skipped, unreadable archive ({cause})"
+                ))),
+                None => Err(file_error(error)),
+            },
+        }
     }
 }
 
@@ -1097,6 +1142,19 @@ struct Unpacked {
     skipped: Vec<String>,
 }
 
+/// An archive the portal served that cannot be opened at all, such as a truncated ZIP without
+/// its end-of-central-directory record. Unlike a local staging error, it concerns only this file.
+#[derive(Debug)]
+struct UnreadableArchive(String);
+
+impl std::fmt::Display for UnreadableArchive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UnreadableArchive {}
+
 /// Unpacks the files in a ZIP. Directory structure is dropped and nested archives stay files.
 ///
 /// Sizes are measured from the bytes actually decompressed, never from the headers. A member
@@ -1105,34 +1163,49 @@ struct Unpacked {
 /// decompressed byte counts toward the total, including bytes of discarded members, so the
 /// work and disk use stay bounded whatever the headers claim. A member is staged and listed
 /// only after it was read completely.
+///
+/// An archive that cannot be opened fails with `UnreadableArchive`. A member that cannot be
+/// read or has an unsafe path is skipped with a note, and the other members are kept.
 fn unpack(
     path: &Path,
     directory: &Path,
     archive_name: &str,
     limits: UnpackLimits,
 ) -> Result<Unpacked> {
-    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-    anyhow::ensure!(
-        archive.len() <= MAX_ARCHIVE_ENTRIES,
-        "ZIP contains too many entries"
-    );
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)
+        .map_err(|error| UnreadableArchive(error.to_string()))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UnreadableArchive(format!("more than {MAX_ARCHIVE_ENTRIES} entries")).into());
+    }
     let mut expanded = 0_u64;
     let mut documents = Vec::new();
     let mut skipped = Vec::new();
     let mut buffer = [0; 64 * 1024];
     let entries = archive.len();
     for index in 0..entries {
-        let mut entry = archive.by_index(index)?;
+        let mut entry = match archive.by_index(index) {
+            Ok(entry) => entry,
+            Err(error) => {
+                skipped.push(format!(
+                    "{archive_name}/entry {}: skipped, unreadable ({error})",
+                    index + 1
+                ));
+                continue;
+            }
+        };
         if entry.is_dir() {
             continue;
         }
-        let name = entry
-            .enclosed_name()
-            .and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .context("ZIP contains an invalid entry path")?;
+        let Some(name) = entry.enclosed_name().and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }) else {
+            skipped.push(format!(
+                "{archive_name}/entry {}: skipped, unsafe path",
+                index + 1
+            ));
+            continue;
+        };
         if entry.size() > limits.file {
             skipped.push(format!(
                 "{archive_name}/{name}: skipped, declared larger than the {} file limit",
@@ -1145,8 +1218,15 @@ fn unpack(
         let mut size = 0_u64;
         let mut over_file = false;
         let mut over_total = false;
+        let mut unreadable = None;
         loop {
-            let length = entry.read(&mut buffer)?;
+            let length = match entry.read(&mut buffer) {
+                Ok(length) => length,
+                Err(error) => {
+                    unreadable = Some(error);
+                    break;
+                }
+            };
             if length == 0 {
                 break;
             }
@@ -1174,6 +1254,13 @@ fn unpack(
                 if remaining == 2 { "y" } else { "ies" }
             ));
             break;
+        }
+        if let Some(error) = unreadable {
+            drop(temp);
+            skipped.push(format!(
+                "{archive_name}/{name}: skipped, unreadable ({error})"
+            ));
+            continue;
         }
         if over_file {
             drop(temp);
@@ -1346,6 +1433,26 @@ mod unpack_tests {
     }
 
     #[test]
+    fn truncated_archive_is_unreadable_not_a_staging_error() {
+        let staged = unpack_bytes(b"PK truncated archive", 1_000, 1_000);
+        let error = staged.result.unwrap_err();
+        let cause = error
+            .downcast_ref::<UnreadableArchive>()
+            .expect("an unreadable archive");
+        assert!(cause.0.contains("EOCD"), "{cause}");
+        assert!(staged.files.is_empty());
+    }
+
+    #[test]
+    fn unavailable_note_names_the_file_and_the_cause() {
+        let url = Url::parse("https://portal.example/files/notice.pdf?x=1").unwrap();
+        assert_eq!(
+            unavailable_note(&url, "Portal returned HTTP 404"),
+            "notice.pdf: skipped, portal returned HTTP 404"
+        );
+    }
+
+    #[test]
     fn total_over_the_limit_keeps_earlier_members_and_skips_the_rest() {
         let archive = zip(&[
             ("a.txt", &[b'a'; 100]),
@@ -1423,10 +1530,19 @@ mod unpack_tests {
         assert_eq!(names(staged.result.as_ref().unwrap()), ["nested.zip"]);
         assert_only_documents(&staged);
 
-        let staged = unpack_bytes(&zip(&[("../evil.txt", b"evil")]), 1_000, 10_000);
-        let error = staged.result.unwrap_err().to_string();
-        assert!(error.contains("invalid entry path"), "{error}");
-        assert!(staged.files.is_empty());
+        // A traversal path is never written; the member is skipped and the others are kept.
+        let staged = unpack_bytes(
+            &zip(&[("../evil.txt", b"evil"), ("ok.txt", b"ok")]),
+            1_000,
+            10_000,
+        );
+        let unpacked = staged.result.as_ref().unwrap();
+        assert_eq!(names(unpacked), ["ok.txt"]);
+        assert_eq!(
+            unpacked.skipped,
+            ["bundle.zip/entry 1: skipped, unsafe path"]
+        );
+        assert_only_documents(&staged);
     }
 
     #[test]

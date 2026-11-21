@@ -363,8 +363,28 @@ async fn portal_lifecycle_preserves_verified_data_and_serves_document_bytes() {
 
     fixture.layout.store(3, Ordering::SeqCst);
     call(&app, "POST", &refresh, None).await;
-    let failed = wait_for(&app, &path, |value| value["state"] == "failed").await;
-    assert!(failed["reason"].as_str().unwrap().contains("login"));
+    // One of tender A's three files is behind a login: it is skipped like a dead link, and the
+    // others are still delivered.
+    let skipped = wait_for(&app, &path, |value| {
+        value["reason"] == "Last read verified, 1 document skipped"
+    })
+    .await;
+    assert_eq!(skipped["state"], "serving");
+    let gated = get_json(&app, &tender_path).await;
+    let alpha = gated
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tender| tender["id"] == "A")
+        .unwrap();
+    let names: Vec<_> = alpha["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|document| document["fileName"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"spec.pdf"), "{names:?}");
+    assert!(!names.is_empty(), "{names:?}");
 
     fixture.layout.store(2, Ordering::SeqCst);
     call(&app, "POST", &refresh, None).await;

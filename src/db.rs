@@ -379,10 +379,15 @@ impl Store {
             "cannot publish incomplete pagination"
         );
         let evidence = serde_json::to_string(&StoredEvidence::from(&candidate.evidence))?;
+        let skipped = skipped_summary(&candidate.evidence);
+        let portal_reason = match candidate.evidence.skipped_document_count {
+            0 => "Last read verified".to_owned(),
+            count => format!("Last read verified, {} skipped", documents(count)),
+        };
         let now = Utc::now();
         let mut tx = self.0.begin().await?;
-        let changed = sqlx::query("UPDATE portals SET state = 'serving', reason = 'Last read verified', last_success_at = ?, next_read_at = ?, recipe = ? WHERE id = ? AND generation = ? AND deleted = 0")
-            .bind(now.to_rfc3339()).bind(now.timestamp().saturating_add(interval)).bind(recipe)
+        let changed = sqlx::query("UPDATE portals SET state = 'serving', reason = ?, last_success_at = ?, next_read_at = ?, recipe = ? WHERE id = ? AND generation = ? AND deleted = 0")
+            .bind(portal_reason).bind(now.to_rfc3339()).bind(now.timestamp().saturating_add(interval)).bind(recipe)
             .bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
             return Ok(());
@@ -455,7 +460,7 @@ impl Store {
             count => format!("{count} changed"),
         };
         let reason = format!(
-            "{note}. {} held, {changes}",
+            "{note}. {} held, {changes}{skipped}",
             crate::domain::tenders(usize::try_from(held).unwrap_or(0))
         );
         sqlx::query("UPDATE runs SET finished_at = ?, result = 'ok', reason = ? WHERE id = ?")
@@ -822,6 +827,39 @@ fn url_key(url: &str) -> String {
         parsed.set_query(None);
     }
     parsed.into()
+}
+
+/// Skip notes named in a run reason before the rest are only counted.
+const SKIP_NOTES_SHOWN: usize = 5;
+
+fn documents(count: usize) -> String {
+    if count == 1 {
+        "1 document".to_owned()
+    } else {
+        format!("{count} documents")
+    }
+}
+
+/// The run reason's account of documents a published read left out, such as
+/// `. 2 documents skipped: a.pdf: skipped, portal returned HTTP 404; …`. Empty when none were.
+fn skipped_summary(evidence: &crate::domain::Evidence) -> String {
+    let count = evidence.skipped_document_count;
+    if count == 0 {
+        return String::new();
+    }
+    let shown: Vec<&str> = evidence
+        .skipped_documents
+        .iter()
+        .take(SKIP_NOTES_SHOWN)
+        .map(String::as_str)
+        .collect();
+    let more = count.saturating_sub(shown.len());
+    let more = if more > 0 {
+        format!("; and {more} more")
+    } else {
+        String::new()
+    };
+    format!(". {} skipped: {}{more}", documents(count), shown.join("; "))
 }
 
 #[cfg(test)]

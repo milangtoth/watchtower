@@ -4,24 +4,31 @@ Watchtower turns a public procurement portal URL into a verified tender feed. It
 
 ## Run
 
-Copy `.env.example` to `.env` and set `OPENAI_API_KEY` and `WATCHTOWER_MODEL`. Write values without quotes, because Docker's `--env-file` passes quote characters through literally.
+Copy `.env.example` to `.env` and set `WATCHTOWER_MODEL_PROVIDER=anthropic`, `ANTHROPIC_API_KEY` and `WATCHTOWER_MODEL=claude-sonnet-5-5`. This is the provider the latest live runs used. Write values without quotes, because Docker's `--env-file` passes quote characters through literally.
 
 ```sh
 docker build --platform linux/amd64 -t watchtower .
 docker run --rm -p 8080:8080 --env-file .env -v watchtower-data:/data watchtower
-curl -sS -X POST http://localhost:8080/portals -H 'Content-Type: application/json' \
-  -d '{"url":"https://procurement.example/listings"}'
+curl -sS -X POST http://localhost:8080/portals -H 'Content-Type: application/json'   -d '{"url":"https://procurement.example/listings"}'
 ```
 
-Poll `GET /portals/{id}` for state, pull `GET /portals/{id}/tenders` (with `?changedSince=` for incremental pulls), and download each document from its `path` under `/files/{id}`. Refresh, run history and removal follow the appendix. For local development, run `cargo run --locked` with the same two variables exported.
+Poll `GET /portals/{id}` for state, pull `GET /portals/{id}/tenders` (with `?changedSince=` for incremental pulls), and download each document from its `path` under `/files/{id}`. Refresh, run history and removal follow the appendix. For local development, run `cargo run --locked` with the same variables exported.
 
-| Environment variable | Purpose |
-|---|---|
-| `OPENAI_API_KEY` | Model credentials for deciding, learning, checking and repair. Required to attach. |
-| `WATCHTOWER_MODEL` | OpenAI model ID with Structured Outputs support, such as `gpt-5.4`. Required to attach. |
-| `WATCHTOWER_DATA_DIR` | SQLite database and document files. Defaults to `./data` locally and `/data` in Docker. |
-| `WATCHTOWER_READ_INTERVAL` | Seconds between scheduled reads. Defaults to `900`. |
-| `RUST_LOG` | Log filter. Defaults to `info`. |
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `WATCHTOWER_MODEL_PROVIDER` | `openai` | Model API: `anthropic`, `openai` or `deepseek`. Set `anthropic` for the hand-in. The code default stays `openai`. |
+| `ANTHROPIC_API_KEY` | none | Key used when the provider is `anthropic`. |
+| `OPENAI_API_KEY` | none | Key used when the provider is `openai`. |
+| `DEEPSEEK_API_KEY` | none | Key used when the provider is `deepseek`. Its recipes varied between runs, so it isn't recommended. |
+| `WATCHTOWER_MODEL` | none | Model ID for the chosen provider, such as `claude-sonnet-5-5`. It needs structured outputs. Without a key and a model, attaching fails with a reason that says so. |
+| `WATCHTOWER_MODEL_URL` | provider's endpoint | Overrides the model API endpoint. |
+| `WATCHTOWER_MODEL_CONCURRENCY` | `6` | Model calls in flight at once across all portals. |
+| `WATCHTOWER_DATA_DIR` | `./data`, `/data` in Docker | SQLite database and document files. |
+| `WATCHTOWER_READ_INTERVAL` | `900` | Seconds between scheduled reads. |
+| `WATCHTOWER_CONCURRENCY` | `32` | Portals worked on at once. |
+| `RUST_LOG` | `info` | Log filter. |
+
+`WATCHTOWER_DEV_CACHE` and `WATCHTOWER_DEV_RPS` are development switches described in [docs/handoff.md](docs/handoff.md). They are off by default and must stay unset for judging, because `WATCHTOWER_DEV_RPS` raises the per-portal rate above one request per second.
 
 The optional voice assistant's variables are in [docs/tender-assistant.md](docs/tender-assistant.md).
 
@@ -32,7 +39,7 @@ One Rust service runs the API and dashboard (Axum), an in-process scheduler (Tok
 1. **Attach.** `POST /portals` returns the ID at once and starts a background read. The portal is `integrating`.
 2. **Probe and decide.** Cheap requests find candidate methods: HTML listing, public JSON, OCDS API, feed or sitemap. An embedded ranker scores them, and one model call picks one and records why.
 3. **Learn.** The model proposes a declarative recipe from bounded page samples. Rust validates it and runs only the operations the recipe schema allows.
-4. **Read and check.** The runner reads every listing page, detail page and document. It streams files to disk, unpacks ZIPs safely and skips files over 250 MB. It publishes only when pagination is shown complete and the fields and documents pass checks. First reads, suspicious reads and repairs also get a model check.
+4. **Read and check.** The runner reads every listing page, detail page and document. It streams files to disk, unpacks ZIPs safely and skips files over 250 MB. A single file that fails, such as a 404, a corrupt ZIP, a timeout or a login in front of that one file, is skipped and named in the run reason. When most document links fail, the read counts as broken, and when most sit behind a login or CAPTCHA, the portal is `failed`. It publishes only when pagination is shown complete and the fields and documents pass checks. First reads, suspicious reads and repairs also get a model check.
 5. **Serve.** A verified read is published atomically and the portal is `serving`. Healthy repeat reads use the stored recipe with **no model calls**.
 6. **Repair.** When a read breaks, the portal is `healing` and keeps serving its last verified tenders and files. The model gets the old recipe and the failure evidence, and the new recipe must pass the same checks before it replaces anything. When attempts run out, or a login or CAPTCHA blocks access, the portal is `failed` and the reason says why.
 
@@ -40,7 +47,11 @@ The dashboard shows each portal's state, reason, last success, tender count and 
 
 ## Model cost per portal
 
-The [cost report](scripts/model_costs.py) reads token usage from SQLite and estimates USD per portal and operation. See the [usage instructions](docs/architecture.md#model-usage). Measured on 2026-11-20 with `gpt-5.4` at $2.50 input, $0.25 cached input and $15 output per 1M tokens:
+> **Outdated.** These figures come from an OpenAI `gpt-5.4` run on 2026-11-20, before the decide step and before the switch to Anthropic. They don't describe the hand-in configuration. New figures need a paid Claude run of the development split.
+
+The [cost report](scripts/model_costs.py) reads token usage from SQLite and estimates USD per portal and operation. See the [usage instructions](docs/architecture.md#model-usage). The script has built-in rates only for `gpt-5.4` and `gpt-5.4-mini`. For Claude, pass `--input-rate`, `--cached-input-rate` and `--output-rate`.
+
+Measured on 2026-11-20 with `gpt-5.4` at $2.50 input, $0.25 cached input and $15 output per 1M tokens:
 
 | Portal | Attach (learn and check) | Repair to date |
 |---|---:|---:|
@@ -49,7 +60,7 @@ The [cost report](scripts/model_costs.py) reads token usage from SQLite and esti
 | TenderNed (failed) | $0.057 | $0.381 |
 | Find a Tender (failed, HTTP 403) | $0.079 | $0.022 |
 
-A simple portal costs about two to five cents to attach. One full repair of the mock portal cost $0.076. Healthy repeat reads cost nothing. These figures predate the decide step, which adds one call per attach.
+In that run, a simple portal cost about two to five cents to attach, and one full repair of the mock portal cost $0.076. Healthy repeat reads make no model calls. The only Claude figure so far is a total, not a per-portal number: the last live run with `claude-sonnet-5-5` on 7 portals cost about $2.60 in all ([handoff](docs/handoff.md)), including portals that were still attaching or failed.
 
 ## Verify
 
