@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS portals (
 );
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, portal_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL,
-    started_at TEXT, finished_at TEXT, result TEXT
+    started_at TEXT, finished_at TEXT, result TEXT, reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_read ON runs(portal_id, generation)
     WHERE kind = 'read' AND finished_at IS NULL;

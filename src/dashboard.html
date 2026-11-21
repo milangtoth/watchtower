@@ -188,6 +188,11 @@
     if (!response.ok) throw new Error('HTTP ' + response.status);
     return response.json();
   }
+  async function getText(path) {
+    const response = await fetch(path, { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.text();
+  }
   const counts = (held, tenders) => amount(held) + (held === 1 ? ' tender held' : ' tenders held')
     + (tenders ? ' · ' + amount(tenders.filter(tender => tender.status === 'open').length) + ' open' : '');
 
@@ -202,14 +207,12 @@
       loaded = true;
       content.textContent = 'Loading details…';
       try {
-        const [runs, tenders] = await Promise.all([get(base + '/runs'), readTenders()]);
-        const history = node('ul', 'record-list');
-        for (const run of runs.slice(-8).reverse()) {
-          const item = node('li');
-          item.append(node('span', 'record-name', run.kind + ' · ' + (run.result ?? 'running')),
-            node('span', 'record-time', date(run.startedAt)));
-          history.append(item);
-        }
+        // The server renders run history with each run's reason, escaped, and pairs a broken
+        // read with the repair it started.
+        const [historyHtml, tenders] = await Promise.all([getText('/dashboard' + base + '/history'), readTenders()]);
+        const history = node('div', 'run-history-frame');
+        history.innerHTML = historyHtml;
+        for (const time of history.querySelectorAll('time[datetime]')) time.textContent = date(time.dateTime);
         const records = node('ul', 'record-list');
         for (const tender of tenders) {
           const item = node('li');
@@ -221,7 +224,7 @@
           records.append(item);
         }
         content.replaceChildren(node('h4', null, 'Recent runs'),
-          runs.length ? history : node('p', null, 'Waiting for first read'),
+          history,
           node('h4', null, 'Tenders'), tenders.length ? records : node('p', null, 'No tenders published'),
           link('Tender API response ↗', base + '/tenders', 'detail-api'));
       } catch (error) {

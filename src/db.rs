@@ -1,6 +1,6 @@
 use crate::domain::{
     CandidateRead, ConnectionDecision, ModelOperation, ModelUsage, Portal, PublishedTender, Run,
-    StoredEvidence, TenderStatus,
+    RunHistory, StoredEvidence, TenderStatus,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -64,6 +64,7 @@ impl Store {
         sqlx::raw_sql(include_str!("schema.sql"))
             .execute(&pool)
             .await?;
+        migrate(&pool).await?;
         Ok(Self(pool))
     }
 
@@ -187,7 +188,7 @@ impl Store {
             .bind(Utc::now().timestamp().saturating_add(recheck)).execute(&mut *tx).await?;
         sqlx::query("UPDATE portals SET next_read_at = 0 WHERE deleted = 0 AND (state IN ('integrating', 'healing') OR EXISTS (SELECT 1 FROM runs r WHERE r.portal_id = portals.id AND r.generation = portals.generation AND r.started_at IS NOT NULL AND r.finished_at IS NULL))")
             .execute(&mut *tx).await?;
-        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE started_at IS NOT NULL AND finished_at IS NULL")
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed', reason = COALESCE(reason, 'Interrupted by a service restart before the run finished') WHERE started_at IS NOT NULL AND finished_at IS NULL")
             .bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
@@ -256,7 +257,14 @@ impl Store {
         .await?)
     }
 
-    pub async fn begin_repair(&self, job: &Job, reason: &str) -> Result<Option<String>> {
+    /// Enters healing with `reason` as the portal reason, finishes the read that broke with
+    /// `broke` as its run reason, and starts a repair run.
+    pub async fn begin_repair(
+        &self,
+        job: &Job,
+        reason: &str,
+        broke: &str,
+    ) -> Result<Option<String>> {
         let mut tx = self.0.begin().await?;
         let changed = sqlx::query("UPDATE portals SET state = 'healing', reason = ? WHERE id = ? AND generation = ? AND deleted = 0")
             .bind(reason).bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?.rows_affected();
@@ -264,8 +272,9 @@ impl Store {
             return Ok(None);
         }
         let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE id = ?")
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed', reason = ? WHERE id = ?")
             .bind(&now)
+            .bind(broke)
             .bind(&job.id)
             .execute(&mut *tx)
             .await?;
@@ -283,8 +292,9 @@ impl Store {
         sqlx::query("UPDATE portals SET state = 'failed', reason = ?, next_read_at = ? WHERE id = ? AND generation = ? AND deleted = 0")
             .bind(reason).bind(Utc::now().timestamp().saturating_add(retry_in))
             .bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?;
-        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE id = ?")
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed', reason = ? WHERE id = ?")
             .bind(Utc::now().to_rfc3339())
+            .bind(reason)
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
@@ -308,6 +318,7 @@ impl Store {
         recipe: &str,
         candidate: CandidateRead,
         interval: i64,
+        note: &str,
     ) -> Result<()> {
         anyhow::ensure!(
             candidate.evidence.terminal_page,
@@ -361,6 +372,7 @@ impl Store {
                 changed_tenders.push((key, tender));
             }
         }
+        let changed = changed_tenders.len();
         for (key, tender) in changed_tenders {
             for doc in &tender.documents {
                 sqlx::query("INSERT OR IGNORE INTO portal_files(portal_id, generation, sha256) VALUES(?, ?, ?)")
@@ -373,10 +385,12 @@ impl Store {
             sqlx::query("INSERT INTO tenders(portal_id, generation, tender_key, payload) VALUES(?, ?, ?, ?) ON CONFLICT(portal_id, generation, tender_key) DO UPDATE SET payload = excluded.payload")
                 .bind(&job.portal_id).bind(job.generation).bind(key).bind(payload).execute(&mut *tx).await?;
         }
-        sqlx::query("UPDATE portals SET tender_count = (SELECT COUNT(*) FROM tenders WHERE portal_id = ? AND generation = ?) WHERE id = ?")
-            .bind(&job.portal_id).bind(job.generation).bind(&job.portal_id).execute(&mut *tx).await?;
-        sqlx::query("UPDATE runs SET finished_at = ?, result = 'ok' WHERE id = ?")
+        let held: i64 = sqlx::query_scalar("UPDATE portals SET tender_count = (SELECT COUNT(*) FROM tenders WHERE portal_id = ? AND generation = ?) WHERE id = ? RETURNING tender_count")
+            .bind(&job.portal_id).bind(job.generation).bind(&job.portal_id).fetch_one(&mut *tx).await?;
+        let reason = format!("{note}. {held} tender(s) held, {changed} changed");
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'ok', reason = ? WHERE id = ?")
             .bind(now.to_rfc3339())
+            .bind(reason)
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
@@ -509,10 +523,14 @@ impl Store {
                 )),
             ),
         };
+        let run_reason = reason
+            .clone()
+            .unwrap_or_else(|| format!("Portal still unavailable: {failure}. Retrying at {at}"));
         sqlx::query("UPDATE portals SET state = ?, reason = COALESCE(?, reason), next_read_at = ? WHERE id = ? AND generation = ? AND deleted = 0")
             .bind(state).bind(reason).bind(next).bind(&job.portal_id).bind(job.generation).execute(&mut *tx).await?;
-        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed' WHERE id = ?")
+        sqlx::query("UPDATE runs SET finished_at = ?, result = 'failed', reason = ? WHERE id = ?")
             .bind(now.to_rfc3339())
+            .bind(run_reason)
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
@@ -585,6 +603,23 @@ impl Store {
         Ok(Some(runs))
     }
 
+    /// The portal's runs with their recorded reasons, for the dashboard.
+    pub async fn run_history(&self, id: &str) -> Result<Option<Vec<RunHistory>>> {
+        let mut tx = self.0.begin().await?;
+        let generation: Option<i64> =
+            sqlx::query_scalar("SELECT generation FROM portals WHERE id = ? AND deleted = 0")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(generation) = generation else {
+            return Ok(None);
+        };
+        let runs = sqlx::query_as("SELECT id, kind, started_at, finished_at, result, reason FROM runs WHERE portal_id = ? AND generation = ? AND started_at IS NOT NULL ORDER BY rowid")
+            .bind(id).bind(generation).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(Some(runs))
+    }
+
     pub async fn has_file(&self, sha: &str) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM portal_files f JOIN portals p ON p.id = f.portal_id AND p.generation = f.generation WHERE p.deleted = 0 AND f.sha256 = ?)")
             .bind(sha).fetch_one(&self.0).await?)
@@ -628,9 +663,54 @@ impl Store {
     }
 }
 
+/// Brings a database created by an earlier version up to `schema.sql`, whose
+/// `CREATE TABLE IF NOT EXISTS` leaves existing tables as they were.
+async fn migrate(pool: &SqlitePool) -> Result<()> {
+    let has_reason: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name = 'reason')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_reason {
+        sqlx::query("ALTER TABLE runs ADD COLUMN reason TEXT")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn opening_a_database_from_before_run_reasons_adds_the_column() {
+        let data = tempfile::TempDir::new().unwrap();
+        let path = data.path().join("old.sqlite");
+        {
+            let pool = SqlitePoolOptions::new()
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&path)
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            sqlx::raw_sql("CREATE TABLE runs (id TEXT PRIMARY KEY, portal_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, result TEXT); INSERT INTO runs VALUES('r', 'p', 1, 'read', 'x', 'y', 'ok');")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+        }
+        let store = Store::open(&path).await.unwrap();
+        let reason: Option<String> = sqlx::query_scalar("SELECT reason FROM runs WHERE id = 'r'")
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+        assert_eq!(reason, None, "existing runs keep a null reason");
+        drop(store);
+        Store::open(&path).await.expect("opening again is a no-op");
+    }
 
     #[tokio::test]
     async fn restart_schedules_a_recheck_for_failed_portals_left_unscheduled() {

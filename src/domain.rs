@@ -23,6 +23,18 @@ pub struct Run {
     pub result: Option<String>,
 }
 
+/// A run with the reason the worker recorded when it finished: what broke on a failed read,
+/// what a repair changed. Dashboard only; the appendix fixes the shape of [`Run`].
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RunHistory {
+    pub id: String,
+    pub kind: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub result: Option<String>,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Document {

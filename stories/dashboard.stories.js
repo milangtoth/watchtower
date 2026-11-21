@@ -86,6 +86,29 @@ const runs = {
   eastborough: [run('e1', 'read', '09:45', '09:46', 'failed')],
 };
 
+// The markup `/dashboard/portals/{id}/history` renders (src/dashboard.rs), newest first.
+function step(kind, result, started, role, reason) {
+  return '<div class="run-step" data-kind="' + kind + '" data-result="' + result + '">'
+    + '<span class="record-name">' + kind + ' · ' + result + (role ? ' · ' + role : '') + '</span>'
+    + '<time class="record-time" datetime="2026-11-20T' + started + ':00Z"></time>'
+    + (reason ? '<p class="run-reason">' + reason + '</p>' : '') + '</div>';
+}
+const list = items => '<ul class="record-list run-history">' + items.join('') + '</ul>';
+const history = {
+  westmere: list([
+    '<li>' + step('read', 'ok', '09:59', '', 'Read verified. 2 tender(s) held, 0 changed') + '</li>',
+    '<li>' + step('read', 'ok', '09:30', '', 'Attached and verified. 2 tender(s) held, 2 changed') + '</li>',
+  ]),
+  northport: list([
+    '<li class="run-pair">'
+      + step('read', 'failed', '10:01', 'what broke', 'Listing returned 0 rows for items ".row". The last verified read held 42 tender(s), 40 open, and stays served')
+      + step('repair', 'running', '10:02', 'repair in progress', '') + '</li>',
+    '<li>' + step('read', 'ok', '09:29', '', 'Read verified. 42 tender(s) held, 1 changed') + '</li>',
+  ]),
+  alderwick: list(['<li>' + step('read', 'running', '10:03', '', '') + '</li>']),
+  eastborough: list(['<li>' + step('read', 'failed', '09:45', '', 'Listing pages answer with a sign-in page; a login blocks delivery') + '</li>']),
+};
+
 function preview({ scenario }) {
   const portals = scenario === 'fleet' ? fleet : scenario === 'serving' ? [fleet[0]] : [];
   const responses = { '/portals': portals };
@@ -93,6 +116,7 @@ function preview({ scenario }) {
     const path = '/portals/' + portal.id;
     responses[path + '/tenders'] = tenders[portal.id] ?? [];
     responses[path + '/runs'] = runs[portal.id] ?? [];
+    responses['/dashboard' + path + '/history'] = history[portal.id] ?? '<p>Waiting for first read</p>';
   }
   const fixture = `<script>
     const fixtures = ${JSON.stringify(responses)};
@@ -103,6 +127,9 @@ function preview({ scenario }) {
         return new Response(null, { status: 503 });
       }
       if (path === file.path) return new Response(fileText, {headers: {'Content-Type': 'text/plain'}});
+      if (Object.hasOwn(fixtures, path) && typeof fixtures[path] === 'string') {
+        return new Response(fixtures[path], {headers: {'Content-Type': 'text/html'}});
+      }
       if (Object.hasOwn(fixtures, path)) return Response.json(fixtures[path]);
       return new Response(null, {status: 404});
     }
