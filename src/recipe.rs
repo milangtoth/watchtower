@@ -294,10 +294,8 @@ impl Recipe {
             self.detail_fields.is_empty() || self.detail_link.is_some() || self.entry_listing(),
             "detail fields need a detail link"
         );
-        ensure!(
-            self.document_page.is_none() || self.documents.is_some(),
-            "document page needs a document selector"
-        );
+        // A document page without a `documents` selector is read with the HTML fallback, which
+        // finds file and download links on each attachment page.
         Ok(())
     }
 }
@@ -2082,6 +2080,28 @@ fn deadline(value: &str, recipe: &Recipe) -> Option<DateTime<FixedOffset>> {
 mod recipe_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn document_page_without_documents_selector_reads_files_with_the_fallback() {
+        let recipe: Recipe = serde_json::from_value(json!({
+            "listing": "html", "items": ".row",
+            "detail_link": {"path": "a", "attribute": "href"},
+            "document_page": {"path": ".docs", "attribute": "href"}
+        }))
+        .unwrap();
+        recipe.validate().unwrap();
+        let page = Page {
+            url: Url::parse("https://portal.example/document_101.html").unwrap(),
+            body: r#"<main><a href="/files/spec.pdf">Specification</a></main>"#.into(),
+        };
+        let (found, by) =
+            attachment_page_links(&page, &recipe, true, LinkSource::Recipe, None, None).unwrap();
+        assert_eq!(by, LinkSource::Fallback);
+        assert_eq!(
+            found.files,
+            vec![Url::parse("https://portal.example/files/spec.pdf").unwrap()]
+        );
+    }
 
     #[test]
     fn items_accepts_a_string_or_a_selection_without_attribute() {
