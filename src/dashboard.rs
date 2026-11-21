@@ -3,10 +3,10 @@ use axum::{
     Router,
     extract::{Path, State},
     http::{StatusCode, header},
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Json},
     routing::get,
 };
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 const JAVASCRIPT: [(header::HeaderName, &str); 1] =
     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")];
@@ -26,6 +26,20 @@ pub(crate) fn routes() -> Router<Api> {
         )
         .route("/dashboard/elevenlabs-sdk.js", get(voice_sdk))
         .route("/dashboard/portals/{id}/history", get(history))
+        .route("/dashboard/open-tenders", get(open_tenders))
+}
+
+/// Open tender counts for every portal in one response, so the dashboard does not download
+/// each portal's tender list to count them. Dashboard only, outside the appendix API.
+async fn open_tenders(State(api): State<Api>) -> Result<Json<BTreeMap<String, usize>>, StatusCode> {
+    api.store
+        .open_tender_counts()
+        .await
+        .map(Json)
+        .map_err(|error| {
+            tracing::error!(%error, "Could not count open tenders");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 async fn voice_sdk() -> Result<impl IntoResponse, StatusCode> {
@@ -97,7 +111,18 @@ pub fn render_history(runs: &[RunHistory]) -> String {
 
 fn step(html: &mut String, run: &RunHistory, role: &str) {
     let result = run.result.as_deref().unwrap_or("running");
-    let mut name = format!("{} · {result}", run.kind);
+    let kind = if run.kind == "repair" {
+        "Repair"
+    } else {
+        "Read"
+    };
+    let verb = match result {
+        "ok" => "succeeded",
+        "failed" => "failed",
+        "running" => "running",
+        _ => "ended",
+    };
+    let mut name = format!("{kind} {verb}");
     if !role.is_empty() {
         name.push_str(" · ");
         name.push_str(role);
@@ -166,8 +191,8 @@ mod tests {
         let pair = html
             .find(r#"<li class="run-pair">"#)
             .expect("a paired entry");
-        let broke = html.find("read · failed · what broke").unwrap();
-        let fixed = html.find("repair · ok · how it was repaired").unwrap();
+        let broke = html.find("Read failed · what broke").unwrap();
+        let fixed = html.find("Repair succeeded · how it was repaired").unwrap();
         assert!(pair < broke && broke < fixed);
         assert!(html.find("Read verified").unwrap() < pair, "newest first");
         assert!(html.contains("Listing selector &lt;.row&gt; found 0 rows"));
@@ -181,7 +206,7 @@ mod tests {
             run("2", "repair", None, None),
         ]);
         assert!(!html.contains("run-pair"));
-        assert!(html.contains("repair · running"));
+        assert!(html.contains("Repair running"));
         assert_eq!(render_history(&[]), "<p>Waiting for first read</p>");
     }
 }

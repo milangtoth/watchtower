@@ -396,7 +396,7 @@ async fn first_attach_falls_back_when_the_chosen_method_reads_no_tenders() {
         "{reasons:?}"
     );
     assert!(
-        reasons[1].starts_with("Attached and verified via Feed after Sitemap failed. 2 tender(s)"),
+        reasons[1].starts_with("Attached and verified via Feed after Sitemap failed. 2 tenders"),
         "{reasons:?}"
     );
     h.shutdown().await;

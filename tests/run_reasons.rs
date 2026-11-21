@@ -203,10 +203,10 @@ async fn failed_read_and_its_repair_record_reasons_the_dashboard_shows_together(
         .find(r#"<li class="run-pair">"#)
         .expect("the broken read and its repair share one entry");
     let broke = history
-        .find("read · failed · what broke")
+        .find("Read failed · what broke")
         .expect("the failed read is labelled");
     let fixed = history
-        .find("repair · ok · how it was repaired")
+        .find("Repair succeeded · how it was repaired")
         .expect("the repair is labelled");
     assert!(pair < broke && broke < fixed, "{history}");
     let reasons: Vec<&str> = history
@@ -218,7 +218,7 @@ async fn failed_read_and_its_repair_record_reasons_the_dashboard_shows_together(
     assert_eq!(reasons.len(), 3, "{history}");
     let (read, repair, attach) = (reasons[0], reasons[1], reasons[2]);
     assert!(
-        read.contains("The last verified read held 2 tender(s), 2 open, and stays served"),
+        read.contains("The last verified read held 2 tenders, 2 open, and stays served"),
         "{read}"
     );
     assert!(
@@ -230,8 +230,11 @@ async fn failed_read_and_its_repair_record_reasons_the_dashboard_shows_together(
     let failure = read.split(". The last verified read").next().unwrap();
     assert!(!failure.is_empty());
     assert!(repair.contains(failure), "the repair names what it fixed");
-    assert!(repair.ends_with("2 tender(s) held, 0 changed"), "{repair}");
-    assert_eq!(attach, "Attached and verified. 2 tender(s) held, 2 changed");
+    assert!(repair.ends_with("2 tenders held, no changes"), "{repair}");
+    assert_eq!(attach, "Attached and verified. 2 tenders held, 2 changed");
+
+    let open = get_json(&app, "/dashboard/open-tenders").await;
+    assert_eq!(open, serde_json::json!({ id.as_str(): 2 }));
 
     assert_eq!(
         get(&app, "/dashboard/portals/unknown/history").await.0,

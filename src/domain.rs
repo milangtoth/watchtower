@@ -23,6 +23,15 @@ pub struct Run {
     pub result: Option<String>,
 }
 
+/// "1 tender" or "3 tenders", for the run reasons operators read on the dashboard.
+pub fn tenders(count: usize) -> String {
+    if count == 1 {
+        "1 tender".to_owned()
+    } else {
+        format!("{count} tenders")
+    }
+}
+
 /// A run with the reason the worker recorded when it finished: what broke on a failed read,
 /// what a repair changed. Dashboard only; the appendix fixes the shape of [`Run`].
 #[derive(Debug, Clone, sqlx::FromRow)]

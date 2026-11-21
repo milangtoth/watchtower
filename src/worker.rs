@@ -756,7 +756,8 @@ fn describe_break(failure: &ReadFailure, snapshot: &Snapshot<'_>) -> String {
         .filter(|published| published.tender.status == TenderStatus::Open)
         .count();
     format!(
-        "{failure}. The last verified read held {held} tender(s), {open} open, and stays served"
+        "{failure}. The last verified read held {}, {open} open, and stays served",
+        crate::domain::tenders(held)
     )
 }
 
@@ -1112,8 +1113,9 @@ fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, 
     }
     if !vanished.is_empty() {
         signals.push(format!(
-            "{} previously open tender(s) are no longer listed",
-            vanished.len()
+            "{} previously open {} no longer listed",
+            crate::domain::tenders(vanished.len()),
+            if vanished.len() == 1 { "is" } else { "are" }
         ));
     }
 
@@ -1152,7 +1154,8 @@ fn assess(snapshot: &Snapshot<'_>, candidate: &CandidateRead) -> Result<Review, 
     }
     if lost > 0 {
         signals.push(format!(
-            "{lost} tender(s) lost documents, a title, a buyer or a deadline"
+            "{} lost documents, a title, a buyer or a deadline",
+            crate::domain::tenders(lost)
         ));
     }
     for (field, count) in &changed_counts {
