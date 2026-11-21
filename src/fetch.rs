@@ -28,6 +28,8 @@ const FILE_LIMIT: u64 = 250 * 1024 * 1024;
 /// The most bytes one ZIP may expand to, counted as they are decompressed.
 const ARCHIVE_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+/// The longest one probe sample may take, including its wait for the rate limit.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Session cookies kept per host, and the longest cookie name or value kept.
 const MAX_COOKIES: usize = 20;
 const COOKIE_LENGTH: usize = 4096;
@@ -610,18 +612,37 @@ impl PortalHttp {
         Self::read_page(self.request(url, "page headers").await?, "page body").await
     }
 
-    /// Reads a page like `page`, keeping the status and content type for probing.
+    /// Reads a page like `page`, keeping the status and content type for probing. A probe is a
+    /// cheap check, so each sample gets `PROBE_TIMEOUT` rather than the client's read timeout:
+    /// an optional route that hangs, such as a slow sitemap, is skipped instead of stalling.
     pub(crate) async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
-        let response = self.request(url, "probe headers").await?;
-        let status = response.status.as_u16();
-        let content_type = response.content_type().map(str::to_owned);
-        let page = Self::read_page(response, "probe body").await?;
-        Ok(Sample {
-            url: page.url,
-            status,
-            content_type,
-            body: page.body,
-        })
+        let host = url.host_str().unwrap_or("unknown host").to_owned();
+        let read = async {
+            let response = self.request(url, "probe headers").await?;
+            let status = response.status.as_u16();
+            let content_type = response.content_type().map(str::to_owned);
+            let page = Self::read_page(response, "probe body").await?;
+            Ok(Sample {
+                url: page.url,
+                status,
+                content_type,
+                body: page.body,
+            })
+        };
+        Self::timed_sample(&host, read).await
+    }
+
+    async fn timed_sample(
+        host: &str,
+        read: impl Future<Output = Result<Sample, ReadFailure>>,
+    ) -> Result<Sample, ReadFailure> {
+        tokio::time::timeout(PROBE_TIMEOUT, read)
+            .await
+            .unwrap_or_else(|_| {
+                Err(ReadFailure::Temporary(format!(
+                    "Portal fetch failed on {host} (probe): request timed out"
+                )))
+            })
     }
 
     /// Sample a small response within the advertised origin. Bundles can use a bounded prefix;
@@ -632,21 +653,25 @@ impl PortalHttp {
         limit: usize,
         prefix: bool,
     ) -> Result<Sample, ReadFailure> {
-        let mut response = self
-            .request_unless_seen(url, "probe headers", None, true)
-            .await?
-            .expect("no visited URLs supplied");
-        let url = response.url.clone();
-        let status = response.status.as_u16();
-        let content_type = response.content_type().map(str::to_owned);
-        let body = read_limited_text(&mut response, "probe body", limit, limit, prefix).await?;
-        response.commit().await;
-        Ok(Sample {
-            url,
-            status,
-            content_type,
-            body,
-        })
+        let host = url.host_str().unwrap_or("unknown host").to_owned();
+        let read = async {
+            let mut response = self
+                .request_unless_seen(url, "probe headers", None, true)
+                .await?
+                .expect("no visited URLs supplied");
+            let url = response.url.clone();
+            let status = response.status.as_u16();
+            let content_type = response.content_type().map(str::to_owned);
+            let body = read_limited_text(&mut response, "probe body", limit, limit, prefix).await?;
+            response.commit().await;
+            Ok(Sample {
+                url,
+                status,
+                content_type,
+                body,
+            })
+        };
+        Self::timed_sample(&host, read).await
     }
 
     pub(crate) async fn page_unless_seen(

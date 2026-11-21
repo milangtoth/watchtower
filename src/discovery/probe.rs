@@ -7,9 +7,9 @@
 //!    read too (following one `<meta http-equiv="refresh">`). Pages of the GOV.UK publishing
 //!    platform, recognised by their `govuk:` meta tags, offer their Content API JSON twin,
 //! 2. sitemaps from `robots.txt`, `<link rel="sitemap">` or `/sitemap.xml`,
-//! 3. one sample of each discovered feed or JSON URL,
+//! 3. discovered feed or JSON URLs and endpoints named by linked API documentation,
 //! 4. for a thin app shell, verify public GET listing URLs advertised in same-origin bundles,
-//! 5. links to TED notices as evidence, and the start page as an HTML fallback for ordinary pages.
+//! 5. links to TED notices as evidence, and the usual HTML fallback when discovery succeeds.
 //!
 //! Detection is generic: there are no per-portal rules, only platform conventions, so nothing
 //! depends on which portals are in the test set. Every request goes through the portal's rate-limited client. A login or
@@ -38,6 +38,8 @@ const MAX_SAMPLES: usize = 6;
 const MAX_MACHINE_LINKS: usize = 4;
 /// The home page and one meta refresh, read when the start page offers no machine links.
 const HOME_REQUESTS: usize = 2;
+/// Endpoints named by an API documentation page that are sampled.
+const MAX_DOC_ENDPOINTS: usize = 2;
 /// Table headers and labels longer than this are content, not field names.
 const LABEL_LENGTH: usize = 60;
 /// JSON items and feed entries inspected for field names.
@@ -218,14 +220,26 @@ impl<S: Source> Probe<'_, S> {
         // 2. Sitemaps.
         self.sitemaps(sitemap_roots).await;
 
-        // 3. One sample of each discovered feed or JSON URL.
+        // 3. One sample of each discovered feed or JSON URL. An API or data link that leads to
+        //    an HTML page is documentation: the endpoints it names are sampled too (once).
         let mut sampled = HashSet::new();
+        let mut documentation_read = false;
         for lead in leads {
             if sampled.len() >= MAX_SAMPLES || self.used >= REQUEST_BUDGET {
                 break;
             }
             if sampled.insert(lead.url.clone()) {
-                self.sample_lead(lead).await;
+                let api_link = matches!(
+                    lead.hint,
+                    Some(ConnectionMethod::Json | ConnectionMethod::Ocds)
+                );
+                if let Some(page) = self.sample_lead(lead).await
+                    && api_link
+                    && !documentation_read
+                {
+                    documentation_read = true;
+                    self.api_documentation(&page).await;
+                }
             }
         }
 
@@ -419,13 +433,15 @@ impl<S: Source> Probe<'_, S> {
         });
     }
 
-    async fn sample_lead(&mut self, lead: Lead) {
-        let Some(result) = self.fetch(lead.url.clone()).await else {
-            return;
-        };
+    /// Samples one lead and adds its candidate. Returns the sample when it was an HTML page.
+    async fn sample_lead(&mut self, lead: Lead) -> Option<Sample> {
+        let result = self.fetch(lead.url.clone()).await?;
         match result {
             Ok(sample) => {
                 let parsed = parse_body(&sample.body, sample.content_type.as_deref());
+                if parsed == Parsed::Html {
+                    return Some(sample);
+                }
                 self.push_parsed(&sample, parsed, lead.found_via, None);
             }
             // A refused route is still evidence for the decision; a blocked or flaky one is not.
@@ -444,6 +460,30 @@ impl<S: Source> Probe<'_, S> {
                     });
                 }
             }
+        }
+        None
+    }
+
+    /// Follows API documentation reached through an API or data link: samples the same-site
+    /// endpoints the page names. When it names none, reads one documentation subpage first,
+    /// preferring one about OCDS releases or notices.
+    async fn api_documentation(&mut self, page: &Sample) {
+        let mut endpoints = api_endpoints(&page.url, &page.body);
+        if endpoints.is_empty()
+            && let Some(subpage) = documentation_subpage(&page.url, &page.body)
+            && let Some(Ok(sample)) = self.fetch(subpage).await
+            && parse_body(&sample.body, sample.content_type.as_deref()) == Parsed::Html
+        {
+            endpoints = api_endpoints(&sample.url, &sample.body);
+        }
+        for url in endpoints.into_iter().take(MAX_DOC_ENDPOINTS) {
+            let hint = Some(json_hint(&url));
+            self.sample_lead(Lead {
+                url,
+                found_via: "API documentation",
+                hint,
+            })
+            .await;
         }
     }
 
@@ -1131,6 +1171,114 @@ fn govuk_content_api(page: &Url) -> Option<Url> {
     let mut url = page.join(&format!("/api/content{}", page.path())).ok()?;
     url.set_query(None);
     Some(url)
+}
+
+/// Same-site API endpoints named on a documentation page, in links or in its text (code
+/// samples): paths with an `api` segment followed by at least one more. Queries and example
+/// IDs are dropped: a path that extends another found path is left out. Endpoints about OCDS
+/// releases or notices come first, then shorter paths.
+fn api_endpoints(base: &Url, body: &str) -> Vec<Url> {
+    let url_char = |c: char| c.is_ascii_alphanumeric() || "-._~/:".contains(c);
+    let mut found: Vec<Url> = Vec::new();
+    for (at, _) in body.match_indices("/api/") {
+        let begin = body[..at]
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !url_char(c))
+            .map_or(0, |(index, c)| index + c.len_utf8());
+        let end = at
+            + body[at..]
+                .char_indices()
+                .find(|&(_, c)| !(url_char(c) && c != ':'))
+                .map_or(body.len() - at, |(index, _)| index);
+        let text = &body[begin..end];
+        let text = match text.find("http") {
+            Some(scheme) => &text[scheme..],
+            None => &text[text.find('/').unwrap_or(0)..],
+        };
+        if !text.starts_with('/') && !text.starts_with("http") {
+            continue;
+        }
+        let Some(mut url) = resolve(base, text.trim_end_matches(['/', '.'])) else {
+            continue;
+        };
+        url.set_query(None);
+        let segments: Vec<String> = url
+            .path_segments()
+            .map(|parts| {
+                parts
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(api) = segments.iter().position(|segment| segment == "api") else {
+            continue;
+        };
+        let rest = &segments[api + 1..];
+        let documentation = rest.iter().any(|s| {
+            ["doc", "swagger", "help"]
+                .iter()
+                .any(|word| s.contains(word))
+        });
+        if rest.is_empty() || documentation || !related_host(&url, base) {
+            continue;
+        }
+        if !found.contains(&url) {
+            found.push(url);
+        }
+    }
+    let extends = |url: &Url, other: &Url| {
+        url != other
+            && url.host_str() == other.host_str()
+            && url.path().starts_with(&format!("{}/", other.path()))
+    };
+    let mut endpoints: Vec<Url> = found
+        .iter()
+        .filter(|url| !found.iter().any(|other| extends(url, other)))
+        .cloned()
+        .collect();
+    endpoints.sort_by_key(|url| (!about_notices(url), url.path().len()));
+    endpoints
+}
+
+/// One same-site API documentation subpage, preferring OCDS releases, then OCDS, then notices.
+fn documentation_subpage(base: &Url, body: &str) -> Option<Url> {
+    let document = Html::parse_document(body);
+    let selector = Selector::parse("a[href]").expect("static selector");
+    let mut best: Option<(u8, Url)> = None;
+    for anchor in document.select(&selector) {
+        let Some(url) = anchor
+            .value()
+            .attr("href")
+            .and_then(|href| resolve(base, href))
+        else {
+            continue;
+        };
+        let path = url.path().to_ascii_lowercase();
+        if !path.contains("api") || url.path() == base.path() || !related_host(&url, base) {
+            continue;
+        }
+        let rank = if path.contains("ocds") && path.contains("release") {
+            0
+        } else if path.contains("ocds") {
+            1
+        } else if notice_path(&url) {
+            2
+        } else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(current, _)| rank < *current) {
+            best = Some((rank, url));
+        }
+    }
+    best.map(|(_, url)| url)
+}
+
+/// An endpoint about OCDS releases or tender notices, judged by its path.
+fn about_notices(url: &Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    path.contains("ocds") || path.contains("release") || notice_path(url)
 }
 
 fn resolve(base: &Url, href: &str) -> Option<Url> {
@@ -1823,6 +1971,104 @@ mod tests {
             [ConnectionMethod::Ocds, ConnectionMethod::Html]
         );
         assert_eq!(candidates[0].found_via, "start page");
+    }
+
+    #[test]
+    fn api_endpoints_come_from_links_and_code_samples() {
+        let base = url("https://www.portal.example/Developer/Documentation");
+        let body = r#"<a href="/apidocumentation/1.0/GET-notices">docs</a>
+            <a href="https://data.other.example/api/action/package_search">other host</a>
+            <pre>GET https://www.portal.example/api/1.0/ocdsReleasePackages?updatedFrom=2020-12-31</pre>
+            <code>/api/1.0/ocdsReleasePackages/000001-2021</code>
+            <code>/api/v2/buyers</code> <code>/api/docs/index</code> <code>/api/</code>"#;
+        let endpoints: Vec<String> = api_endpoints(&base, body)
+            .iter()
+            .map(Url::to_string)
+            .collect();
+        assert_eq!(
+            endpoints,
+            [
+                "https://www.portal.example/api/1.0/ocdsReleasePackages",
+                "https://www.portal.example/api/v2/buyers",
+            ]
+        );
+    }
+
+    #[test]
+    fn documentation_subpage_prefers_ocds_releases() {
+        let base = url("https://portal.example/Developer/Documentation");
+        let body = r#"<a href="/apidocumentation/api-how-to-guide">Guide</a>
+            <a href="/apidocumentation/1.0/GET-ocdsRecordPackages">Records</a>
+            <a href="/apidocumentation/1.0/GET-ocdsReleasePackages">Releases</a>
+            <a href="https://elsewhere.example/apidocs/ocds-releases">Elsewhere</a>"#;
+        assert_eq!(
+            documentation_subpage(&base, body).unwrap().as_str(),
+            "https://portal.example/apidocumentation/1.0/GET-ocdsReleasePackages"
+        );
+        assert!(
+            documentation_subpage(&base, r#"<a href="/apidocumentation/terms">T</a>"#).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_api_link_to_documentation_leads_to_the_endpoint() {
+        let start = "https://www.portal.example/Search";
+        let source = Canned::default()
+            .page(
+                start,
+                "text/html",
+                r#"<html><body><a href="/notice/1">Notice</a>
+                <footer><a href="/Developer/Documentation">Data and API</a></footer></body></html>"#,
+            )
+            .page(
+                "https://www.portal.example/Developer/Documentation",
+                "text/html",
+                r#"<html><body><a href="/apidocumentation/1.0/GET-ocdsReleasePackages">Releases</a></body></html>"#,
+            )
+            .page(
+                "https://www.portal.example/apidocumentation/1.0/GET-ocdsReleasePackages",
+                "text/html",
+                r#"<html><body><pre>/api/1.0/ocdsReleasePackages?updatedFrom=2020-12-31T23:00:00</pre>
+                <pre>/api/1.0/ocdsReleasePackages/000001-2021</pre></body></html>"#,
+            )
+            .page(
+                "https://www.portal.example/api/1.0/ocdsReleasePackages",
+                "application/json",
+                OCDS,
+            );
+        let candidates = probe_with(&url(start), &source).await.unwrap();
+        assert_eq!(
+            methods(&candidates),
+            [ConnectionMethod::Ocds, ConnectionMethod::Html]
+        );
+        assert_eq!(
+            candidates[0].entry_url,
+            "https://www.portal.example/api/1.0/ocdsReleasePackages"
+        );
+        assert_eq!(candidates[0].found_via, "API documentation");
+        assert!(source.requested().len() <= REQUEST_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn documentation_is_followed_only_from_api_links() {
+        let start = "https://portal.example/";
+        let source = Canned::default()
+            .page(
+                start,
+                "text/html",
+                r#"<html><body><a href="/rss">RSS feeds</a></body></html>"#,
+            )
+            .page(
+                "https://portal.example/rss",
+                "text/html",
+                r#"<html><body><code>/api/1.0/notices</code></body></html>"#,
+            );
+        probe_with(&url(start), &source).await.unwrap();
+        assert!(
+            !source
+                .requested()
+                .contains(&"https://portal.example/api/1.0/notices".to_string())
+        );
     }
 
     /// The real client against a local server: gzip sitemaps are unpacked by `PortalHttp`, and
