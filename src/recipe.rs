@@ -40,6 +40,13 @@ const LISTING_PAGE_LIMIT: usize = 250;
 /// Seconds to wait after an OCDS API answers a later page with something other than JSON.
 const OCDS_THROTTLE_WAIT: u64 = 300;
 
+/// Days of releases an OCDS preset read asks for. Open tenders are published or updated within
+/// this window, so the read does not page through the publisher's whole history.
+const OCDS_WINDOW_DAYS: i64 = 90;
+
+/// The largest page the Find a Tender and Contracts Finder OCDS APIs return.
+const OCDS_PAGE_SIZE: &str = "100";
+
 /// More URLs than this in a sitemap would take too long to read at one request per second.
 const SITEMAP_PAGE_LIMIT: usize = 500;
 
@@ -455,10 +462,13 @@ pub async fn read(
     recipe: &Recipe,
 ) -> Result<CandidateRead, ReadFailure> {
     recipe.validate().map_err(incomplete)?;
-    let start = match &recipe.start_url {
+    let mut start = match &recipe.start_url {
         Some(start) => resolve(portal_url, start).map_err(incomplete)?,
         None => portal_url.clone(),
     };
+    if recipe.preset == Some(Preset::Ocds) {
+        start = ocds_window(&start, chrono::Utc::now());
+    }
     let mut queue = VecDeque::from([start]);
     let mut seen_pages = HashSet::new();
     let mut listing_pages = Vec::new();
@@ -800,6 +810,52 @@ fn ocds_listing(page: &Page) -> Result<ListingPage> {
     })
 }
 
+/// Narrows an OCDS API URL to tender-stage releases published or updated in the last
+/// `OCDS_WINDOW_DAYS`, in the largest pages the API allows, using the query parameters of the
+/// API family it recognizes. The window ends now, so the API's cursor reaches a last page.
+///
+/// Find a Tender (`ocdsReleasePackages`, `ocdsRecordPackages`) filters with `updatedFrom`,
+/// `updatedTo`, `stages` and `limit` and pages with `cursor`. Contracts Finder (`OCDS/Search`)
+/// uses `publishedFrom` and `publishedTo`. Other URLs are read as given. A cursor in the entry
+/// URL is dropped so that every read starts at the window's first page.
+fn ocds_window(url: &Url, now: chrono::DateTime<chrono::Utc>) -> Url {
+    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
+    let has = |name: &str| {
+        url.query_pairs()
+            .any(|(key, _)| key.eq_ignore_ascii_case(name))
+    };
+    let (from, to) = if path.ends_with("/ocdsreleasepackages")
+        || path.ends_with("/ocdsrecordpackages")
+        || has("updatedFrom")
+        || has("updatedTo")
+    {
+        ("updatedFrom", "updatedTo")
+    } else if path.ends_with("/ocds/search") || has("publishedFrom") || has("publishedTo") {
+        ("publishedFrom", "publishedTo")
+    } else {
+        return url.clone();
+    };
+    let replaced = [from, to, "stages", "limit", "cursor"];
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| !replaced.iter().any(|name| key.eq_ignore_ascii_case(name)))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let stamp = |time: chrono::DateTime<chrono::Utc>| time.format("%Y-%m-%dT%H:%M:%S").to_string();
+    pairs.extend([
+        (
+            from.to_owned(),
+            stamp(now - chrono::Duration::days(OCDS_WINDOW_DAYS)),
+        ),
+        (to.to_owned(), stamp(now)),
+        ("stages".to_owned(), "tender".to_owned()),
+        ("limit".to_owned(), OCDS_PAGE_SIZE.to_owned()),
+    ]);
+    let mut windowed = url.clone();
+    windowed.query_pairs_mut().clear().extend_pairs(pairs);
+    windowed
+}
+
 /// The same URL with its page-number query parameter increased by one.
 fn next_page_number(url: &Url, parameter: &str) -> Result<Url> {
     let mut found = false;
@@ -1120,6 +1176,8 @@ async fn attachment_files(
     let mut page_files = HashSet::new();
     let mut documents = Vec::new();
     let mut fetched = 0;
+    // Attachment pages that offered onward links.
+    let mut linked_pages = 0;
     while let Some((link, is_page)) = pages
         .pop_front()
         .map(|link| (link, true))
@@ -1166,15 +1224,32 @@ async fn attachment_files(
         }
         fetched += 1;
         visited.insert(page.url.clone());
-        let (more, source) = attachment_page_links(
+        let found = attachment_page_links(
             &page,
             recipe,
             is_page,
             link.source,
             link.referrer.as_ref(),
             link.scope.as_deref(),
-        )
-        .map_err(incomplete)?;
+        );
+        let (more, source) = match found {
+            Ok(found) => found,
+            // The fallback guessed this page from its name alone, so a page without file links
+            // is not evidence that the recipe broke.
+            Err(error)
+                if link.source == LinkSource::Fallback
+                    && numbered_document_link(&link.url) == Some(NumberedLink::Document) =>
+            {
+                tracing::warn!(
+                    location = %location(&page.url),
+                    %error,
+                    "Skipping document page without file links"
+                );
+                continue;
+            }
+            Err(error) => return Err(incomplete(error)),
+        };
+        linked_pages += 1;
         page_files.extend(more.files.iter().cloned());
         let here = Some(page.url.clone());
         files.extend(queue(more.files, depth, source, &here, None));
@@ -1189,7 +1264,7 @@ async fn attachment_files(
             samples.push(sample_page(&page, 16_000).body);
         }
     }
-    if fetched > 0 && page_files.is_disjoint(&downloaded) {
+    if linked_pages > 0 && page_files.is_disjoint(&downloaded) {
         return Err(ReadFailure::Incomplete(
             "Attachment pages did not lead to any file links".into(),
         ));
@@ -1252,6 +1327,7 @@ fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments
     let anchors = Selector::parse("a[href]").unwrap();
     let mut candidates = BTreeMap::new();
     let mut files = Vec::new();
+    let mut document_pages = Vec::new();
     for anchor in content.select(&anchors) {
         let Some(href) = anchor
             .value()
@@ -1270,7 +1346,12 @@ fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments
             .path()
             .rsplit_once('.')
             .map(|(_, extension)| extension.to_ascii_lowercase());
-        if anchor.value().attr("download").is_some()
+        let numbered = numbered_document_link(&url);
+        if numbered == Some(NumberedLink::Document) && url.origin() == page.url.origin() {
+            let label = anchor.text().collect::<Vec<_>>().join(" ");
+            document_pages.push((url, label));
+        } else if numbered == Some(NumberedLink::Download)
+            || anchor.value().attr("download").is_some()
             || extension.as_deref().is_some_and(|extension| {
                 matches!(
                     extension,
@@ -1315,6 +1396,11 @@ fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments
                 .or_insert_with(|| anchor.text().collect::<Vec<_>>().join(" "));
         }
     }
+    // Pages about one numbered document are read like file links, which follow HTML to the
+    // file, unless the page already links the files themselves.
+    if files.is_empty() {
+        files = document_pages;
+    }
     if let Some(scope) = scope {
         let terms = attachment_scope_terms(scope);
         let matches: Vec<_> = files
@@ -1341,6 +1427,54 @@ fn scoped_html_attachment_links(page: &Page, scope: Option<&str>) -> Attachments
         files: files.into_iter().map(|(url, _)| url).collect(),
         fallback: true,
         scope,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumberedLink {
+    /// The link serves the file, as in `document_download_123.html` or `/download/123`.
+    Download,
+    /// The link opens a page about one document, as in `document_123.html`.
+    Document,
+}
+
+/// Recognizes a link named after a numbered document, as E-ZAK and similar portals write
+/// them. The last path segment, without a page extension such as `.html`, ends in a number,
+/// and the word before the number says whether the link downloads the file or opens a page
+/// about it. A bare number takes its word from the segment before, as in `/download/123`.
+fn numbered_document_link(url: &Url) -> Option<NumberedLink> {
+    let segments: Vec<&str> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let (last, before) = segments.split_last()?;
+    let stem = match last.rsplit_once('.') {
+        Some((stem, extension))
+            if matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "html" | "htm" | "php" | "asp" | "aspx" | "jsp"
+            ) =>
+        {
+            stem
+        }
+        Some(_) => return None,
+        None => last,
+    };
+    let mut words: Vec<String> = stem
+        .split(['_', '-'])
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if words.len() == 1 {
+        words.insert(0, before.last()?.to_ascii_lowercase());
+    }
+    let (number, words) = words.split_last()?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match words.last()?.as_str() {
+        "download" => Some(NumberedLink::Download),
+        "document" | "dokument" | "attachment" | "file" => Some(NumberedLink::Document),
+        _ => None,
     }
 }
 
@@ -1712,6 +1846,317 @@ mod recipe_tests {
                     .to_string();
             assert!(error.contains("items"), "{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_fix_tests {
+    use super::*;
+    use crate::fetch::Fetcher;
+    use axum::{
+        Router,
+        extract::{RawQuery, State},
+        http::{Uri, header},
+        response::{Html as HtmlBody, IntoResponse},
+        routing::get,
+    };
+    use std::sync::{Arc, Mutex};
+
+    type Requests = Arc<Mutex<Vec<String>>>;
+
+    async fn serve(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        format!("http://{address}")
+    }
+
+    fn at(hour: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(2026, 11, 20, hour, 0, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn ocds_window_asks_find_a_tender_for_recent_tender_stage_releases() {
+        let entry = Url::parse(
+            "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=25&cursor=abc",
+        )
+        .unwrap();
+        assert_eq!(
+            ocds_window(&entry, at(9)).as_str(),
+            "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?\
+             updatedFrom=2026-08-22T09%3A00%3A00&updatedTo=2026-11-20T09%3A00%3A00\
+             &stages=tender&limit=100"
+        );
+        let records = Url::parse("https://fts.example/api/1.0/ocdsRecordPackages?lang=en").unwrap();
+        let windowed = ocds_window(&records, at(9));
+        let query: Vec<_> = windowed
+            .query_pairs()
+            .map(|(key, _)| key.into_owned())
+            .collect();
+        assert_eq!(
+            query,
+            ["lang", "updatedFrom", "updatedTo", "stages", "limit"]
+        );
+    }
+
+    #[test]
+    fn ocds_window_uses_published_dates_for_contracts_finder_and_leaves_other_apis_alone() {
+        let entry = Url::parse(
+            "https://www.contractsfinder.service.gov.uk/Published/Notices/OCDS/Search?stages=award",
+        )
+        .unwrap();
+        let windowed = ocds_window(&entry, at(0));
+        let query: BTreeMap<_, _> = windowed.query_pairs().into_owned().collect();
+        assert_eq!(query["publishedFrom"], "2026-08-22T00:00:00");
+        assert_eq!(query["publishedTo"], "2026-11-20T00:00:00");
+        assert_eq!(query["stages"], "tender");
+        assert_eq!(query["limit"], "100");
+        for other in [
+            "https://portal.example/ocds?page=2",
+            "https://portal.example/api/releases.json",
+        ] {
+            let url = Url::parse(other).unwrap();
+            assert_eq!(ocds_window(&url, at(0)), url);
+        }
+    }
+
+    #[tokio::test]
+    async fn ocds_preset_reads_the_window_and_follows_the_cursor_to_the_last_page() {
+        let requests = Requests::default();
+        let router = Router::new()
+            .route(
+                "/api/1.0/ocdsReleasePackages",
+                get(
+                    |State(requests): State<Requests>, RawQuery(query): RawQuery| async move {
+                        let query = query.unwrap_or_default();
+                        requests.lock().unwrap().push(query.clone());
+                        let body = if query.contains("cursor=") {
+                            include_str!("../tests/fixtures/ocds/fts_window_page2.json")
+                        } else {
+                            include_str!("../tests/fixtures/ocds/fts_window_page1.json")
+                        };
+                        ([(header::CONTENT_TYPE, "application/json")], body)
+                    },
+                ),
+            )
+            .with_state(requests.clone());
+        let base = serve(router).await;
+        let candidate = ConnectionCandidate {
+            method: ConnectionMethod::Ocds,
+            entry_url: format!("{base}/api/1.0/ocdsReleasePackages?stages=tender&limit=25"),
+            found_via: "test".into(),
+            http_status: 200,
+            content_type: Some("application/json".into()),
+            sample_items: 2,
+            fields_seen: Vec::new(),
+            has_pagination: true,
+            score: 1.0,
+        };
+        let recipe = Recipe::preset(&candidate).unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let portal = Url::parse(&base).unwrap();
+        let http = Fetcher::new(files.path().into()).unwrap().portal(&portal);
+        let started = chrono::Utc::now();
+        let read = read(&http, &portal, &recipe).await.unwrap();
+
+        let ids: Vec<_> = read.tenders.iter().filter_map(|t| t.id.clone()).collect();
+        assert_eq!(ids, ["041234-2026", "041235-2026", "041236-2026"]);
+        assert_eq!(read.evidence.end_of_list, "last-page");
+        assert_eq!(read.evidence.pages, 2);
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        let first: BTreeMap<String, String> = url_query(&requests[0]);
+        assert_eq!(first["stages"], "tender");
+        assert_eq!(first["limit"], "100");
+        let parse = |value: &str| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+                .unwrap()
+                .and_utc()
+        };
+        let (from, to) = (parse(&first["updatedFrom"]), parse(&first["updatedTo"]));
+        assert_eq!(to - from, chrono::Duration::days(OCDS_WINDOW_DAYS));
+        assert!(
+            (to - started).num_seconds().abs() <= 60,
+            "{to} vs {started}"
+        );
+        assert!(url_query(&requests[1]).contains_key("cursor"));
+        assert!(read.evidence.listing_pages[0].contains("updatedFrom="));
+    }
+
+    fn url_query(query: &str) -> BTreeMap<String, String> {
+        Url::parse(&format!("https://x.example/?{query}"))
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect()
+    }
+
+    #[test]
+    fn numbered_document_links_are_recognized_by_their_last_words() {
+        for (link, expected) in [
+            ("/document_download_101.html", Some(NumberedLink::Download)),
+            ("/document_101.html", Some(NumberedLink::Document)),
+            ("/document_101/", Some(NumberedLink::Document)),
+            ("/files/download/77", Some(NumberedLink::Download)),
+            ("/download-12.php", Some(NumberedLink::Download)),
+            ("/contract_display_7.html", None),
+            ("/tenders/101", None),
+            ("/document_101.pdf", None),
+            ("/document_download.html", None),
+            ("/101", None),
+        ] {
+            let url = Url::parse("https://zakazky.example.cz")
+                .unwrap()
+                .join(link)
+                .unwrap();
+            assert_eq!(numbered_document_link(&url), expected, "{link}");
+        }
+    }
+
+    #[test]
+    fn html_fallback_prefers_download_links_over_document_pages() {
+        let page = Page {
+            url: Url::parse("https://zakazky.example.cz/contract_display_7.html").unwrap(),
+            body: include_str!("../tests/fixtures/ezak/contract_display.html").into(),
+        };
+        let found = html_attachment_links(&page);
+        let files: Vec<_> = found.files.iter().map(Url::as_str).collect();
+        assert_eq!(
+            files,
+            [
+                "https://zakazky.example.cz/document_101/",
+                "https://zakazky.example.cz/document_102.html"
+            ]
+        );
+        let page = Page {
+            url: Url::parse("https://zakazky.example.cz/document_101/").unwrap(),
+            body: include_str!("../tests/fixtures/ezak/document_101.html").into(),
+        };
+        let files: Vec<_> = html_attachment_links(&page)
+            .files
+            .iter()
+            .map(Url::to_string)
+            .collect();
+        assert_eq!(
+            files,
+            ["https://zakazky.example.cz/document_download_101.html"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ezak_document_pages_lead_to_files_named_by_content_disposition() {
+        let requests = Requests::default();
+        let page = |body: &'static str| HtmlBody(body).into_response();
+        let router = Router::new()
+            .route(
+                "/document_101/",
+                get(move || async move {
+                    page(include_str!("../tests/fixtures/ezak/document_101.html"))
+                }),
+            )
+            .route(
+                "/document_102.html",
+                get(move || async move {
+                    page(include_str!("../tests/fixtures/ezak/document_102.html"))
+                }),
+            )
+            .route(
+                "/document_103.html",
+                get(move || async move { page("<html><body><p>Smazáno</p></body></html>") }),
+            )
+            .route(
+                "/document_download_101.html",
+                get(|| async {
+                    (
+                        [
+                            (header::CONTENT_TYPE, "application/pdf"),
+                            (
+                                header::CONTENT_DISPOSITION,
+                                "attachment; filename=\"Zadavaci.pdf\"; \
+                                 filename*=UTF-8''Zad%C3%A1vac%C3%AD%20dokumentace.pdf",
+                            ),
+                        ],
+                        "%PDF-1.4 tender",
+                    )
+                }),
+            )
+            .route(
+                "/document_download_102.html",
+                get(|| async {
+                    (
+                        [
+                            (header::CONTENT_TYPE, "application/octet-stream"),
+                            (
+                                header::CONTENT_DISPOSITION,
+                                "attachment;filename=\"vykaz_vymer.xlsx\"",
+                            ),
+                        ],
+                        "spreadsheet bytes",
+                    )
+                }),
+            )
+            .fallback(
+                |uri: Uri| async move { (axum::http::StatusCode::NOT_FOUND, uri.to_string()) },
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                requests.clone(),
+                |State(requests): State<Requests>,
+                 request: axum::extract::Request,
+                 next: axum::middleware::Next| async move {
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push(request.uri().path().to_owned());
+                    next.run(request).await
+                },
+            ));
+        let base = serve(router).await;
+        let detail = Page {
+            url: Url::parse(&format!("{base}/contract_display_7.html")).unwrap(),
+            body: include_str!("../tests/fixtures/ezak/contract_display.html").into(),
+        };
+        let recipe: Recipe =
+            serde_json::from_value(serde_json::json!({"listing": "html", "items": "tr"})).unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let http = Fetcher::new(files.path().into())
+            .unwrap()
+            .portal(&detail.url);
+        let mut samples = Vec::new();
+        let mut documents = attachment_files(
+            &http,
+            html_attachment_links(&detail),
+            &recipe,
+            Some(detail.url.clone()),
+            &mut samples,
+        )
+        .await
+        .unwrap();
+        documents.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        let names: Vec<_> = documents.iter().map(|d| d.file_name.as_str()).collect();
+        assert_eq!(names, ["Zadávací dokumentace.pdf", "vykaz_vymer.xlsx"]);
+        assert_eq!(documents[0].size_bytes, "%PDF-1.4 tender".len() as u64);
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            [
+                "/document_101/",
+                "/document_102.html",
+                "/document_download_101.html",
+                "/document_download_102.html"
+            ]
+        );
+
+        // A document page that links no file is skipped, not a broken read.
+        let empty = Attachments {
+            files: vec![Url::parse(&format!("{base}/document_103.html")).unwrap()],
+            fallback: true,
+            ..Attachments::default()
+        };
+        let documents = attachment_files(&http, empty, &recipe, None, &mut samples)
+            .await
+            .unwrap();
+        assert!(documents.is_empty());
     }
 }
 

@@ -1,0 +1,15 @@
+{
+  "uri": "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
+  "publishedDate": "2026-11-20T09:00:00Z",
+  "releases": [
+    {
+      "ocid": "ocds-h6vhtk-0500a3",
+      "id": "041236-2026",
+      "date": "2026-11-19T16:30:00+00:00",
+      "tag": ["tender"],
+      "buyer": {"name": "County Council"},
+      "tender": {"id": "041236-2026", "title": "School meals", "status": "active"}
+    }
+  ],
+  "links": {}
+}
