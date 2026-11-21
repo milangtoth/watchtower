@@ -700,6 +700,7 @@ impl Harness {
                 model: model.clone(),
                 interval,
                 recovery,
+                concurrency: watchtower::worker::CONCURRENCY,
             }
             .run(stop.clone()),
         );
