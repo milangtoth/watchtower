@@ -189,6 +189,14 @@ pub struct ConnectionCandidate {
     pub score: f32,
 }
 
+impl ConnectionCandidate {
+    /// TED can be discovered from a notice link without a sampled HTTP response.
+    pub fn is_usable(&self) -> bool {
+        (200..300).contains(&self.http_status)
+            || (self.method == ConnectionMethod::Ted && self.http_status == 0)
+    }
+}
+
 /// The connection method chosen for a portal, stored per attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -310,6 +318,7 @@ impl std::error::Error for ReadFailure {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ModelOperation {
+    Decide,
     Learn,
     Verify,
     Repair,
@@ -318,6 +327,7 @@ pub enum ModelOperation {
 impl ModelOperation {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Decide => "decide",
             Self::Learn => "learn",
             Self::Verify => "verify",
             Self::Repair => "repair",

@@ -54,9 +54,9 @@ portals:
     split: development
     expect: serving
     best_method: html
-    entry_url: https://www.etenders.gov.ie/epps/prepareCurrentOpportunities.do?currentType=cft
+    entry_url: https://www.etenders.gov.ie/epps/quickSearchAction.do?searchType=cftFTS&latest=true
     readiness: five-public-downloads-verified
-    note: The server-rendered current opportunities listing includes deadlines. Five source downloads were verified through the public Proceed without association option.
+    note: The current opportunities URL redirects to this server-rendered listing with deadlines. Five source downloads were verified through the public Proceed without association option.
     evidence: etenders-ie-baseline.json
     samples: IE.json
 
@@ -276,8 +276,11 @@ portals:
     kind: multi-step
     split: holdout
     expect: serving
+    best_method: json
+    entry_url: https://www.boamp.fr/api/explore/v2.1/catalog/datasets/boamp/records?order_by=dateparution%20desc&limit=10
     readiness: needs-five-download-baseline
-    evidence: https://www.boamp.fr/pages/entreprise-accueil/
+    note: The public data API returned distinct pages with notice IDs, buyers, dates, deadlines and notice URLs.
+    evidence: https://www.boamp.fr/pages/donnees-ouvertes-et-api/
 
   - name: Contracts Finder
     url: https://www.contractsfinder.service.gov.uk/Search
@@ -286,7 +289,11 @@ portals:
     kind: multi-step
     split: holdout
     expect: serving
+    best_method: ocds
+    entry_url: https://www.contractsfinder.service.gov.uk/Published/Notices/OCDS/Search?limit=10&stages=tender
     readiness: needs-five-download-baseline
+    note: The published OCDS search returned ten tender-stage releases with document references and a next-page link.
+    evidence: https://www.gov.uk/government/publications/open-contracting
 
   - name: Malta eTenders
     url: https://www.etenders.gov.mt/epps/prepareCurrentOpportunities.do?currentType=cft
@@ -294,7 +301,9 @@ portals:
     software: European Dynamics ePPS
     kind: multi-step
     split: holdout
-    expect: serving
+    expect: failed
+    expected_blocker: CAPTCHA required by the current opportunities search form
+    note: The submitted listing requires a CAPTCHA. Previously collected public detail and attachment URLs are retained in the baseline.
     samples: MT.json
 
   - name: Toruń platformazakupowa
@@ -304,4 +313,7 @@ portals:
     kind: server-rendered
     split: holdout
     expect: serving
+    best_method: html
+    entry_url: https://platformazakupowa.pl/pn/wszz_torun/proceedings
+    note: The public HTML lists the same tender detail URLs as the baseline with verified attachments.
     samples: PL.json

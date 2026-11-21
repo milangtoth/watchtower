@@ -138,7 +138,7 @@ Watchtower turns a portal URL into a verified tender feed in eight steps. The mo
 | 7. **Check** | Pagination, field quality, documents, and source evidence are checked. First reads, suspicious reads, and repairs also get model verification. A verified read is published atomically, and the portal is `serving`. | 1 call when needed |
 | 8. **Repair** | When a read breaks, the portal is `healing` and keeps serving its last verified tenders and files. The model gets the old recipe and the failure evidence. After two failed repair attempts on one method (one for OCDS), Watchtower re-decides with the next alternative (attempt 2). After two methods, the portal is `failed`, and the reason names the methods tried. A login or CAPTCHA also ends in `failed`. | per attempt |
 
-Status: probing is live. Each attach probes the start page, known national APIs, sitemaps, feeds and TED links, and records every candidate with its evidence. Ranking and the decide call are still placeholders while qwas's ranker and decision land: every candidate scores 0, so the first candidate the probe found is chosen without a model call (`model: "none (top-ranked)"`), and the rest become fallbacks for repair. The ranker's offline training script is `scripts/train_ranker.py`. Readers for feeds, sitemaps and OCDS, the stored decisions and the fallback on repair are in place.
+Each attach probes the start page, known national APIs, sitemaps, feeds and TED links. The ranker scores the candidates with embedded logistic regression weights. The decision call receives structured candidate evidence and chooses a usable route. If a repair exhausts one method, a new decision considers the remaining usable methods. [The test inventory](testset/README.md) describes how to reproduce the evaluation.
 
 The Axum API places work in SQLite. The Tokio worker runs one operation per portal at a time. OpenAI uses bounded samples to propose a declarative recipe, which Rust validates before running it against HTML or public JSON. The same fetcher handles exploration, listing, detail, and document requests and spaces requests at least one second apart per portal. Downloads are streamed to disk and ZIP entries are unpacked and hashed.
 
@@ -172,7 +172,7 @@ Measured with `gpt-5.4` (some calls with `gpt-5.4-mini`) on the local preview, 2
 
 A complete run of the live repair demo on the mock portal (attach, then a layout change and repair) used 11 calls and cost $0.076: learn $0.012 (2 calls), verify $0.030 (4), repair $0.035 (5). On the first attach, verification rejected a description taken from the wrong paragraph. The first repair corrected it before publication.
 
-A successful attach of a simple portal costs about two to five cents. Failing real portals cost more because learning and repair retry up to their limits. TenderNed's repairs account for most of the spend. The decide step adds one call per attach and one per re-decision once qwas's model decision lands. These numbers will be replaced with qwas's evaluation across the test set.
+In these measurements, a successful attach of a simple portal cost about two to five cents. Failing real portals cost more because learning and repair retry up to their limits. TenderNed's repairs accounted for most of the spend. These measurements predate the decide step, which adds one call per attach and one per re-decision with usable candidates.
 
 Healthy repeat reads use the stored recipe without a model call. The cost to learn or repair a real portal varies with the evidence sampled and the number of attempts.
 

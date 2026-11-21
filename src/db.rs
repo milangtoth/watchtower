@@ -602,6 +602,30 @@ impl Store {
             .bind(&job.portal_id).bind(job.generation).execute(&self.0).await?;
         Ok(())
     }
+
+    pub async fn usage_totals(
+        &self,
+        job: &Job,
+        operation: ModelOperation,
+    ) -> Result<(i64, ModelUsage)> {
+        let (calls, input, cached_input, output) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+             FROM model_usage WHERE portal_id = ? AND generation = ? AND operation = ?",
+        )
+        .bind(&job.portal_id)
+        .bind(job.generation)
+        .bind(operation.as_str())
+        .fetch_one(&self.0)
+        .await?;
+        Ok((
+            calls,
+            ModelUsage {
+                input,
+                cached_input,
+                output,
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
