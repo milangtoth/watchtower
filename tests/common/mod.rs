@@ -500,6 +500,17 @@ pub struct Auditor {
     /// Connection methods `decide` returns in order, with paths on the fixture. Empty keeps the
     /// default decision for the probed candidates.
     pub connections: Vec<(ConnectionMethod, &'static str)>,
+    pub fakes: Fakes,
+}
+
+/// Model and probe behaviour a test can add to the stand-in.
+#[derive(Default)]
+pub struct Fakes {
+    /// Connection methods learning declares unsupported, as the model does for an empty app
+    /// shell.
+    pub unsupported: Vec<ConnectionMethod>,
+    /// Paths among `connections` whose probe sample showed no items and no pagination.
+    pub bare: Vec<&'static str>,
 }
 
 #[async_trait::async_trait]
@@ -511,6 +522,12 @@ impl PortalModel for Auditor {
         decision: &ConnectionDecision,
     ) -> Result<Recipe, ReadFailure> {
         self.learns.fetch_add(1, Ordering::SeqCst);
+        if self.fakes.unsupported.contains(&decision.chosen.method) {
+            return Err(ReadFailure::Unsupported(format!(
+                "Learning stopped after 1 model call(s), method unsupported: {} entry page is an empty app shell",
+                decision.chosen.method.label()
+            )));
+        }
         let recipe = self
             .recipes
             .iter()
@@ -531,16 +548,23 @@ impl PortalModel for Auditor {
         let candidates = self
             .connections
             .iter()
-            .map(|(method, path)| ConnectionCandidate {
-                method: *method,
-                entry_url: ctx.url.join(path).unwrap().to_string(),
-                found_via: "test".into(),
-                http_status: 200,
-                content_type: None,
-                sample_items: 2,
-                fields_seen: vec!["title".into()],
-                has_pagination: false,
-                score: 0.5,
+            .map(|(method, path)| {
+                let bare = self.fakes.bare.contains(path);
+                ConnectionCandidate {
+                    method: *method,
+                    entry_url: ctx.url.join(path).unwrap().to_string(),
+                    found_via: "test".into(),
+                    http_status: 200,
+                    content_type: None,
+                    sample_items: if bare { 0 } else { 2 },
+                    fields_seen: if bare {
+                        Vec::new()
+                    } else {
+                        vec!["title".into()]
+                    },
+                    has_pagination: false,
+                    score: 0.5,
+                }
             })
             .collect();
         top_ranked(candidates, 1)
@@ -668,6 +692,7 @@ impl Harness {
             recovery,
             Vec::new(),
             Vec::new(),
+            Fakes::default(),
         )
         .await
     }
@@ -686,6 +711,7 @@ impl Harness {
             Recovery::default(),
             connections,
             Vec::new(),
+            Fakes::default(),
         )
         .await
     }
@@ -696,6 +722,16 @@ impl Harness {
         connections: Vec<(ConnectionMethod, &'static str)>,
         recipes: Vec<(ConnectionMethod, Value)>,
     ) -> Self {
+        Self::attach_faked(layout, connections, recipes, Fakes::default()).await
+    }
+
+    /// Like `attach_methods`, with unsupported methods or bare probe samples.
+    pub async fn attach_faked(
+        layout: Layout,
+        connections: Vec<(ConnectionMethod, &'static str)>,
+        recipes: Vec<(ConnectionMethod, Value)>,
+        fakes: Fakes,
+    ) -> Self {
         Self::start(
             layout,
             html_recipe(),
@@ -704,10 +740,12 @@ impl Harness {
             Recovery::default(),
             connections,
             recipes,
+            fakes,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start(
         layout: Layout,
         recipe: Value,
@@ -716,6 +754,7 @@ impl Harness {
         recovery: Recovery,
         connections: Vec<(ConnectionMethod, &'static str)>,
         recipes: Vec<(ConnectionMethod, Value)>,
+        fakes: Fakes,
     ) -> Self {
         let site: Site = Arc::new(Mutex::new(layout));
         let (base, server) = serve(site.clone()).await;
@@ -734,6 +773,7 @@ impl Harness {
             verifies: AtomicUsize::new(0),
             decisions: AtomicUsize::new(0),
             connections,
+            fakes,
         });
         let stop = CancellationToken::new();
         let worker = tokio::spawn(
