@@ -97,6 +97,8 @@ pub enum Provider {
     /// An OpenAI-compatible Chat Completions API in JSON mode, such as DeepSeek. The schema is
     /// given in the instructions, and the reply is validated when it is parsed.
     Chat,
+    /// Anthropic Messages API with JSON Schema structured outputs (`output_config.format`).
+    Anthropic,
 }
 
 impl Provider {
@@ -104,6 +106,7 @@ impl Provider {
         match self {
             Self::OpenAi => "OpenAI",
             Self::Chat => "The model API",
+            Self::Anthropic => "Anthropic",
         }
     }
 }
@@ -147,9 +150,14 @@ impl OpenAi {
                 "DEEPSEEK_API_KEY",
                 "https://api.deepseek.com/chat/completions",
             ),
-            other => {
-                anyhow::bail!("WATCHTOWER_MODEL_PROVIDER must be openai or deepseek, not {other}")
-            }
+            "anthropic" => (
+                Provider::Anthropic,
+                "ANTHROPIC_API_KEY",
+                "https://api.anthropic.com/v1/messages",
+            ),
+            other => anyhow::bail!(
+                "WATCHTOWER_MODEL_PROVIDER must be openai, deepseek or anthropic, not {other}"
+            ),
         };
         let config = env(key_var).zip(env("WATCHTOWER_MODEL"));
         let responses_url = env("WATCHTOWER_MODEL_URL").unwrap_or_else(|| url.into());
@@ -204,18 +212,28 @@ impl OpenAi {
                     {"role": "user", "content": input.to_string()}
                 ]
             }),
+            // Medium effort keeps cost down for recipe work; the schema is enforced by
+            // structured outputs. "default" fallbacks re-run a declined request on another
+            // model inside the same call.
+            Provider::Anthropic => json!({
+                "model": model, "max_tokens": 16000, "system": instructions,
+                "messages": [{"role": "user", "content": input.to_string()}],
+                "output_config": {"effort": "medium", "format": {"type": "json_schema", "schema": schema}},
+                "fallbacks": "default"
+            }),
         };
         let api = self.provider.name();
         let mut waits = MODEL_RETRY_WAITS.iter();
         let response = loop {
-            let response = self
-                .client
-                .post(&self.responses_url)
-                .bearer_auth(key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(model_io)?;
+            let request = self.client.post(&self.responses_url).json(&body);
+            let request = match self.provider {
+                Provider::Anthropic => request
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2026-10-21")
+                    .header("anthropic-beta", "server-side-fallback-2026-07-01"),
+                Provider::OpenAi | Provider::Chat => request.bearer_auth(key),
+            };
+            let response = request.send().await.map_err(model_io)?;
             let status = response.status();
             if status.is_success() {
                 break response;
@@ -767,6 +785,17 @@ fn usage_of(provider: Provider, usage: &Value) -> ModelUsage {
             cached_input: count(&usage["input_tokens_details"]["cached_tokens"]),
             output: count(&usage["output_tokens"]),
         },
+        // Anthropic reports uncached input apart from cache reads and writes.
+        Provider::Anthropic => {
+            let cached = count(&usage["cache_read_input_tokens"]);
+            ModelUsage {
+                input: count(&usage["input_tokens"])
+                    + cached
+                    + count(&usage["cache_creation_input_tokens"]),
+                cached_input: cached,
+                output: count(&usage["output_tokens"]),
+            }
+        }
         Provider::Chat => ModelUsage {
             input: count(&usage["prompt_tokens"]),
             cached_input: usage
@@ -790,6 +819,16 @@ fn output_of(provider: Provider, payload: &Value) -> Option<String> {
                 .flatten()
                 .filter(|part| part["type"] == "output_text")
                 .filter_map(|part| part["text"].as_str())
+                .collect()
+        }),
+        // Thinking blocks come before the text; a refusal or a cut-off reply is not complete.
+        Provider::Anthropic => (payload["stop_reason"].as_str() == Some("end_turn")).then(|| {
+            payload["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str())
                 .collect()
         }),
         Provider::Chat => {
@@ -1035,6 +1074,96 @@ mod discovery_tests {
         assert_eq!(
             (calls, usage.input, usage.cached_input, usage.output),
             (3, 111, 9, 33)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_sends_structured_output_and_reads_text_after_thinking() {
+        use crate::domain::ConnectionMethod::{Html, Ocds};
+        use axum::http::HeaderMap;
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let tally = hits.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |headers: HeaderMap, Json(request): Json<Value>| {
+                let call = tally.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(headers["x-api-key"], "test");
+                    assert_eq!(headers["anthropic-version"], "2026-10-21");
+                    assert_eq!(request["model"], "claude-sonnet-5-5");
+                    assert_eq!(request["output_config"]["format"]["type"], "json_schema");
+                    assert!(
+                        request["output_config"]["format"]["schema"]["properties"]["choiceIndex"]
+                            .is_object()
+                    );
+                    assert!(request["system"].as_str().unwrap().len() > 20);
+                    let input: Value =
+                        serde_json::from_str(request["messages"][0]["content"].as_str().unwrap())
+                            .unwrap();
+                    assert_eq!(input["candidates"][1]["evidence"]["method"], "ocds");
+                    let reply = json!({"choiceIndex": 1, "rationale": "OCDS covers the fields."});
+                    let stop = if call == 0 { "end_turn" } else { "max_tokens" };
+                    Json(json!({
+                        "content": [
+                            {"type": "thinking", "thinking": "", "signature": "x"},
+                            {"type": "text", "text": reply.to_string()}
+                        ],
+                        "stop_reason": stop,
+                        "usage": {"input_tokens": 30, "cache_read_input_tokens": 8,
+                            "cache_creation_input_tokens": 2, "output_tokens": 12}
+                    }))
+                }
+            }),
+        );
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let responses_url = format!("http://{}/v1/messages", socket.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(socket, app).await });
+        let files = tempfile::tempdir().unwrap();
+        let store = Store::open(&files.path().join("anthropic.sqlite"))
+            .await
+            .unwrap();
+        let url = Url::parse("https://portal.example/").unwrap();
+        store.register(url.as_str()).await.unwrap();
+        let job = store.claim().await.unwrap().unwrap();
+        let http = Fetcher::new(files.path().into()).unwrap().portal(&url);
+        let ctx = ReasoningContext {
+            job: &job,
+            url: &url,
+            http: &http,
+        };
+        let model = OpenAi {
+            client: Client::new(),
+            config: Some(("test".into(), "claude-sonnet-5-5".into())),
+            provider: Provider::Anthropic,
+            responses_url,
+            store: store.clone(),
+            slots: Arc::new(tokio::sync::Semaphore::new(MODEL_CONCURRENCY)),
+        };
+        let candidate = |method, path| ConnectionCandidate {
+            method,
+            entry_url: url.join(path).unwrap().to_string(),
+            found_via: "start page link".into(),
+            http_status: 200,
+            content_type: None,
+            sample_items: 5,
+            fields_seen: vec!["title".into()],
+            has_pagination: true,
+            score: 0.5,
+        };
+        let ranked = vec![candidate(Html, "list"), candidate(Ocds, "releases")];
+        let result = model.decide(&ctx, ranked.clone()).await.unwrap();
+        assert_eq!(result.chosen.method, Ocds);
+        let error = model.decide(&ctx, ranked).await.unwrap_err().to_string();
+        assert!(error.contains("output budget"), "{error}");
+        let (calls, usage) = store
+            .usage_totals(&job, ModelOperation::Decide)
+            .await
+            .unwrap();
+        assert_eq!(
+            (calls, usage.input, usage.cached_input, usage.output),
+            (2, 80, 16, 24)
         );
         server.abort();
     }
