@@ -216,7 +216,7 @@ def pause():
 def unit_end(source,cursor,last):
     if source=="ie":
         return last
-    if source=="nl":
+    if source in ("nl","lv"):
         return min(last,date(cursor.year,12,31))
     if source=="es":
         month_end=(cursor.replace(day=28)+timedelta(days=4)).replace(day=1)-DAY
