@@ -1,5 +1,6 @@
 use crate::domain::{Document, ReadFailure};
 use anyhow::{Context, Result};
+use axum::body::Bytes;
 use reqwest::{Client, Response, StatusCode, Url, header};
 use sha2::{Digest, Sha256};
 use std::{
@@ -7,12 +8,15 @@ use std::{
     error::Error,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tempfile::NamedTempFile;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::Mutex,
     time::{Instant, sleep_until},
 };
@@ -27,12 +31,22 @@ const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 /// Session cookies kept per host, and the longest cookie name or value kept.
 const MAX_COOKIES: usize = 20;
 const COOKIE_LENGTH: usize = 4096;
+/// The highest per-portal request rate `WATCHTOWER_DEV_RPS` may set.
+pub const MAX_DEV_RPS: f64 = 5.0;
+/// Marks the start of a development cache entry and its format version.
+const CACHE_MAGIC: &[u8; 8] = b"WTCACHE1";
+const CACHE_CHUNK: u64 = 64 * 1024;
 
 #[derive(Clone)]
 pub struct Fetcher {
     client: Client,
     next_request: Arc<Mutex<HashMap<String, Instant>>>,
     files: PathBuf,
+    /// The least time between two requests to one portal or host. One second unless
+    /// `WATCHTOWER_DEV_RPS` raises the rate during development.
+    spacing: Duration,
+    /// Development-only response cache directory, from `WATCHTOWER_DEV_CACHE`.
+    cache: Option<Arc<PathBuf>>,
 }
 
 pub struct PortalHttp {
@@ -41,6 +55,222 @@ pub struct PortalHttp {
     /// Session cookies the portal set during this run, by host. Some portals keep a search's
     /// filter in the session and page its results through it, so later pages need them.
     cookies: std::sync::Mutex<HashMap<String, BTreeMap<String, String>>>,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+}
+
+impl Drop for PortalHttp {
+    fn drop(&mut self) {
+        let hits = self.cache_hits.load(Ordering::Relaxed);
+        let misses = self.cache_misses.load(Ordering::Relaxed);
+        if self.fetcher.cache.is_some() && hits + misses > 0 {
+            tracing::info!(
+                host = %self.portal_host,
+                hits,
+                misses,
+                "Development cache summary"
+            );
+        }
+    }
+}
+
+/// Reads a `WATCHTOWER_DEV_RPS` value: a positive request rate per portal, 1 when unset, and at
+/// most `MAX_DEV_RPS`.
+pub fn dev_rps(value: Option<&str>) -> Result<f64> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(1.0);
+    };
+    let rps: f64 = value
+        .parse()
+        .context("WATCHTOWER_DEV_RPS must be a positive number")?;
+    anyhow::ensure!(
+        rps.is_finite() && rps > 0.0,
+        "WATCHTOWER_DEV_RPS must be a positive number"
+    );
+    Ok(rps.min(MAX_DEV_RPS))
+}
+
+/// A response whose status was accepted, read from the network or the development cache.
+struct Fetched {
+    url: Url,
+    status: StatusCode,
+    headers: header::HeaderMap,
+    body: Body,
+    /// The cache entry written while the body streams. It is kept only on `commit`.
+    entry: Option<CacheEntry>,
+}
+
+enum Body {
+    Network(Response),
+    Cached {
+        file: tokio::fs::File,
+        remaining: u64,
+    },
+}
+
+struct CacheEntry {
+    temp: NamedTempFile,
+    file: tokio::fs::File,
+    path: PathBuf,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheMeta {
+    url: String,
+    /// Redirect targets followed before the final response, in order.
+    hops: Vec<String>,
+    status: u16,
+    headers: Vec<(String, String)>,
+}
+
+/// The headers callers read from a response, and so the ones a cache entry keeps.
+const CACHED_HEADERS: [header::HeaderName; 2] = [header::CONTENT_TYPE, header::CONTENT_DISPOSITION];
+
+impl Fetched {
+    fn network(response: Response) -> Self {
+        Self {
+            url: response.url().clone(),
+            status: response.status(),
+            headers: response.headers().clone(),
+            body: Body::Network(response),
+            entry: None,
+        }
+    }
+
+    fn content_type(&self) -> Option<&str> {
+        self.headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    fn content_length(&self) -> Option<u64> {
+        match &self.body {
+            Body::Network(response) => response.content_length(),
+            Body::Cached { remaining, .. } => Some(*remaining),
+        }
+    }
+
+    async fn chunk(&mut self, phase: &'static str) -> Result<Option<Bytes>, ReadFailure> {
+        match &mut self.body {
+            Body::Network(response) => {
+                let chunk = response
+                    .chunk()
+                    .await
+                    .map_err(|err| transport_error(&self.url, phase, err))?;
+                if let (Some(chunk), Some(entry)) = (&chunk, &mut self.entry)
+                    && let Err(error) = entry.file.write_all(chunk).await
+                {
+                    tracing::debug!(%error, "Development cache entry abandoned");
+                    self.entry = None;
+                }
+                Ok(chunk)
+            }
+            Body::Cached { file, remaining } => {
+                if *remaining == 0 {
+                    return Ok(None);
+                }
+                let mut buffer = vec![0; (*remaining).min(CACHE_CHUNK) as usize];
+                file.read_exact(&mut buffer).await.map_err(|err| {
+                    ReadFailure::Incomplete(format!("Could not read a cached response: {err}"))
+                })?;
+                *remaining -= buffer.len() as u64;
+                Ok(Some(Bytes::from(buffer)))
+            }
+        }
+    }
+
+    /// Keeps the cache entry for this response once its whole body was read and accepted. The
+    /// entry appears under its final name only by rename, so a crash leaves no partial entry.
+    async fn commit(&mut self) {
+        let Some(CacheEntry {
+            temp,
+            mut file,
+            path,
+        }) = self.entry.take()
+        else {
+            return;
+        };
+        let result = async {
+            file.flush().await?;
+            file.sync_all().await?;
+            drop(file);
+            temp.persist(&path).map_err(|err| err.error)?;
+            std::io::Result::Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "Development cache entry not written");
+        }
+    }
+}
+
+fn cache_path(directory: &Path, url: &Url) -> PathBuf {
+    let key = Sha256::digest(format!("GET {url}"));
+    directory.join(format!("{key:x}"))
+}
+
+/// Opens a cache entry and leaves the file positioned at the body. Unreadable entries count as
+/// missing.
+async fn open_cached(path: &Path) -> std::io::Result<Option<(CacheMeta, Body)>> {
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let total = file.metadata().await?.len();
+    if total < 12 {
+        return Ok(None);
+    }
+    let mut magic = [0; 8];
+    file.read_exact(&mut magic).await?;
+    if &magic != CACHE_MAGIC {
+        return Ok(None);
+    }
+    let length = u64::from(file.read_u32_le().await?);
+    if 12 + length > total {
+        return Ok(None);
+    }
+    let mut meta = vec![0; length as usize];
+    file.read_exact(&mut meta).await?;
+    let Ok(meta) = serde_json::from_slice::<CacheMeta>(&meta) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        meta,
+        Body::Cached {
+            file,
+            remaining: total - 12 - length,
+        },
+    )))
+}
+
+/// Starts a cache entry: a temporary file holding the response header, which `commit` renames
+/// into place once the body has been written after it.
+async fn start_entry(
+    directory: &Path,
+    path: PathBuf,
+    response: &Response,
+    hops: &[Url],
+) -> std::io::Result<CacheEntry> {
+    let meta = CacheMeta {
+        url: response.url().to_string(),
+        hops: hops.iter().map(Url::to_string).collect(),
+        status: response.status().as_u16(),
+        headers: CACHED_HEADERS
+            .iter()
+            .filter_map(|name| {
+                let value = response.headers().get(name)?.to_str().ok()?;
+                Some((name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect(),
+    };
+    let meta = serde_json::to_vec(&meta)?;
+    let temp = NamedTempFile::new_in(directory)?;
+    let mut file = tokio::fs::File::create(temp.path()).await?;
+    file.write_all(CACHE_MAGIC).await?;
+    file.write_u32_le(meta.len() as u32).await?;
+    file.write_all(&meta).await?;
+    Ok(CacheEntry { temp, file, path })
 }
 
 #[derive(Debug)]
@@ -90,7 +320,37 @@ impl Fetcher {
             client,
             next_request: Default::default(),
             files,
+            spacing: Duration::from_secs(1),
+            cache: None,
         })
+    }
+
+    /// Development only: spaces requests to one portal for `rps` requests per second, at most
+    /// `MAX_DEV_RPS`. A value that is not positive keeps one request per second.
+    pub fn with_rate(mut self, rps: f64) -> Self {
+        if rps.is_finite() && rps > 0.0 {
+            self.spacing = Duration::from_secs_f64(1.0 / rps.min(MAX_DEV_RPS));
+        }
+        self
+    }
+
+    /// Development only: saves successful GET responses under `directory` and answers repeated
+    /// requests from there, with no network call and no rate-limit wait.
+    pub fn with_cache(mut self, directory: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&directory)
+            .context("Could not create the development cache directory")?;
+        self.cache = Some(Arc::new(directory));
+        Ok(self)
+    }
+
+    /// The least time between two requests to one portal.
+    pub fn spacing(&self) -> Duration {
+        self.spacing
+    }
+
+    /// The development cache directory, when one is set.
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.cache.as_deref().map(PathBuf::as_path)
     }
 
     pub fn portal(&self, url: &Url) -> PortalHttp {
@@ -98,6 +358,8 @@ impl Fetcher {
             fetcher: self.clone(),
             portal_host: url.host_str().unwrap_or_default().into(),
             cookies: Default::default(),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
         }
     }
 }
@@ -110,10 +372,65 @@ pub fn public_http(url: &Url) -> bool {
 }
 
 impl PortalHttp {
-    async fn request(&self, url: Url, phase: &'static str) -> Result<Response, ReadFailure> {
+    async fn request(&self, url: Url, phase: &'static str) -> Result<Fetched, ReadFailure> {
         self.request_unless_seen(url, phase, None)
             .await?
             .ok_or_else(|| ReadFailure::Incomplete("Portal URL was already sampled".into()))
+    }
+
+    /// Answers a request from the development cache, if one is set and holds the URL.
+    async fn cached(
+        &self,
+        url: &Url,
+        seen: Option<&HashSet<Url>>,
+    ) -> Option<Result<Option<Fetched>, ReadFailure>> {
+        let directory = self.fetcher.cache.as_deref()?;
+        let path = cache_path(directory, url);
+        let (meta, body) = match open_cached(&path).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, "Development cache entry unreadable");
+                return None;
+            }
+        };
+        let final_url = Url::parse(&meta.url).ok()?;
+        let hops = meta
+            .hops
+            .iter()
+            .map(|hop| Url::parse(hop).ok())
+            .collect::<Option<Vec<_>>>()?;
+        let mut headers = header::HeaderMap::new();
+        for (name, value) in &meta.headers {
+            if let (Ok(name), Ok(value)) = (
+                header::HeaderName::from_bytes(name.as_bytes()),
+                header::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        let path_label: String = url.path().chars().take(240).collect();
+        tracing::debug!(
+            host = url.host_str().unwrap_or_default(),
+            path = path_label,
+            status = meta.status,
+            "Development cache hit"
+        );
+        if hops
+            .iter()
+            .any(|hop| seen.is_some_and(|urls| urls.contains(hop)))
+        {
+            return Some(Ok(None));
+        }
+        let status = StatusCode::from_u16(meta.status).ok()?;
+        Some(Ok(Some(Fetched {
+            url: final_url,
+            status,
+            headers,
+            body,
+            entry: None,
+        })))
     }
 
     async fn request_unless_seen(
@@ -121,7 +438,9 @@ impl PortalHttp {
         mut url: Url,
         phase: &'static str,
         seen: Option<&HashSet<Url>>,
-    ) -> Result<Option<Response>, ReadFailure> {
+    ) -> Result<Option<Fetched>, ReadFailure> {
+        let mut key = None;
+        let mut hops = Vec::new();
         for _ in 0..=5 {
             if !public_http(&url) {
                 return Err(ReadFailure::Incomplete(
@@ -131,6 +450,18 @@ impl PortalHttp {
             url.set_fragment(None);
             if seen.is_some_and(|urls| urls.contains(&url)) {
                 return Ok(None);
+            }
+            match &key {
+                Some(_) => hops.push(url.clone()),
+                None => {
+                    if let Some(answer) = self.cached(&url, seen).await {
+                        return answer;
+                    }
+                    if self.fetcher.cache.is_some() {
+                        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                    }
+                    key = Some(url.clone());
+                }
             }
             let host = url.host_str().unwrap_or_default().to_owned();
             loop {
@@ -142,7 +473,7 @@ impl PortalHttp {
                     .unwrap_or(now)
                     .max(entries.get(&host).copied().unwrap_or(now));
                 if wait_until <= now {
-                    let next = now + Duration::from_secs(1);
+                    let next = now + self.fetcher.spacing;
                     entries.insert(self.portal_host.clone(), next);
                     entries.insert(host.clone(), next);
                     break;
@@ -175,7 +506,11 @@ impl PortalHttp {
                 return Err(ReadFailure::Blocked("Portal requires a login".into()));
             }
             if status == StatusCode::FORBIDDEN {
-                let body = read_text(response, "access-denied response body").await?;
+                let body = read_text(
+                    &mut Fetched::network(response),
+                    "access-denied response body",
+                )
+                .await?;
                 if let Some(reason) = access_page(&body) {
                     return Err(ReadFailure::Blocked(reason.into()));
                 }
@@ -207,7 +542,17 @@ impl PortalHttp {
                     status.as_u16()
                 )));
             }
-            return Ok(Some(response));
+            let mut fetched = Fetched::network(response);
+            if let (Some(directory), Some(key)) = (self.fetcher.cache.as_deref(), &key) {
+                let Body::Network(response) = &fetched.body else {
+                    unreachable!("a network response has a network body");
+                };
+                match start_entry(directory, cache_path(directory, key), response, &hops).await {
+                    Ok(entry) => fetched.entry = Some(entry),
+                    Err(error) => tracing::debug!(%error, "Development cache entry not started"),
+                }
+            }
+            return Ok(Some(fetched));
         }
         Err(ReadFailure::Incomplete(
             "Portal redirected too many times".into(),
@@ -249,12 +594,8 @@ impl PortalHttp {
     /// Reads a page like `page`, keeping the status and content type for probing.
     pub(crate) async fn sample(&self, url: Url) -> Result<Sample, ReadFailure> {
         let response = self.request(url, "probe headers").await?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let status = response.status.as_u16();
+        let content_type = response.content_type().map(str::to_owned);
         let page = Self::read_page(response, "probe body").await?;
         Ok(Sample {
             url: page.url,
@@ -278,29 +619,29 @@ impl PortalHttp {
         }
     }
 
-    async fn read_page(response: Response, phase: &'static str) -> Result<Page, ReadFailure> {
-        let url = response.url().clone();
-        let body = read_text(response, phase).await?;
+    async fn read_page(mut response: Fetched, phase: &'static str) -> Result<Page, ReadFailure> {
+        let url = response.url.clone();
+        let body = read_text(&mut response, phase).await?;
         if let Some(reason) = access_page(&body) {
             return Err(ReadFailure::Blocked(reason.into()));
         }
+        response.commit().await;
         Ok(Page { url, body })
     }
 
     pub(crate) async fn documents(&self, url: Url) -> Result<DocumentResponse, ReadFailure> {
         let mut response = self.request(url, "document headers").await?;
         let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
+            .content_type()
             .unwrap_or_default()
             .to_ascii_lowercase();
         if content_type.contains("text/html") {
-            let destination = response.url().clone();
-            let body = read_text(response, "document HTML response body").await?;
+            let destination = response.url.clone();
+            let body = read_text(&mut response, "document HTML response body").await?;
             if let Some(reason) = access_page(&body) {
                 return Err(ReadFailure::Blocked(reason.into()));
             }
+            response.commit().await;
             let host = destination.host_str().unwrap_or_default();
             let path: String = destination.path().chars().take(240).collect();
             tracing::info!(host, path, "Inspecting HTML returned by document link");
@@ -323,12 +664,7 @@ impl PortalHttp {
         let mut hash = Sha256::new();
         let mut size = 0;
         let mut magic = Vec::with_capacity(4);
-        let url = response.url().clone();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|err| transport_error(&url, "document body", err))?
-        {
+        while let Some(chunk) = response.chunk("document body").await? {
             size += chunk.len() as u64;
             if size > FILE_LIMIT {
                 return Ok(DocumentResponse::skipped(over_file_limit(&name)));
@@ -341,6 +677,7 @@ impl PortalHttp {
         }
         file.flush().await.map_err(file_error)?;
         drop(file);
+        response.commit().await;
         let directory = self.fetcher.files.clone();
         let archive = name.to_ascii_lowercase().ends_with(".zip")
             || content_type.contains("application/zip")
@@ -396,14 +733,9 @@ fn set_cookie(header: &str) -> Option<(String, String, bool)> {
     Some((name.to_owned(), value.to_owned(), expired))
 }
 
-async fn read_text(mut response: Response, phase: &'static str) -> Result<String, ReadFailure> {
+async fn read_text(response: &mut Fetched, phase: &'static str) -> Result<String, ReadFailure> {
     let mut data = Vec::new();
-    let url = response.url().clone();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| transport_error(&url, phase, err))?
-    {
+    while let Some(chunk) = response.chunk(phase).await? {
         if data.len() + chunk.len() > PAGE_LIMIT {
             return Err(ReadFailure::Incomplete(
                 "Listing or detail page exceeds the page size limit".into(),
@@ -433,14 +765,14 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>, ReadFailure> {
     Ok(unpacked)
 }
 
-fn filename(response: &Response) -> String {
+fn filename(response: &Fetched) -> String {
     let header_name = response
-        .headers()
+        .headers
         .get(header::CONTENT_DISPOSITION)
         .and_then(|value| disposition_filename(value.as_bytes()));
     header_name
         .as_deref()
-        .or_else(|| response.url().path_segments().and_then(Iterator::last))
+        .or_else(|| response.url.path_segments().and_then(Iterator::last))
         .and_then(|name| name.rsplit(['/', '\\']).next())
         .map(str::trim)
         .filter(|name| !name.is_empty())
