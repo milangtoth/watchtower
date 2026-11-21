@@ -467,6 +467,7 @@ pub async fn read(
     let mut pagination_links = Vec::new();
     let mut listing_rows = Vec::new();
     let mut samples = Vec::new();
+    let mut skipped_documents = Vec::new();
     let mut total = None;
     let mut empty_state = false;
     while let Some(mut url) = queue.pop_front() {
@@ -600,8 +601,15 @@ pub async fn read(
             ));
         }
         let referrer = tender.url.as_deref().and_then(|url| Url::parse(url).ok());
-        tender.documents =
-            attachment_files(http, row.attachments, recipe, referrer, &mut samples).await?;
+        tender.documents = attachment_files(
+            http,
+            row.attachments,
+            recipe,
+            referrer,
+            &mut samples,
+            &mut skipped_documents,
+        )
+        .await?;
         tender.documents.sort_by(|left, right| {
             (&left.file_name, &left.sha256).cmp(&(&right.file_name, &right.sha256))
         });
@@ -619,6 +627,7 @@ pub async fn read(
             total,
             empty_state,
             document_count,
+            skipped_documents,
             listing_pages,
             unfollowed_links,
             samples,
@@ -1088,7 +1097,10 @@ async fn attachment_files(
     recipe: &Recipe,
     referrer: Option<Url>,
     samples: &mut Vec<String>,
+    skipped_documents: &mut Vec<String>,
 ) -> Result<Vec<Document>, ReadFailure> {
+    /// Notes kept per read on files skipped over a size limit.
+    const SKIPPED_NOTE_LIMIT: usize = 20;
     const MAX_PAGES: usize = 32;
     const MAX_DEPTH: usize = 3;
     let queue = |urls: Vec<Url>, depth, source, referrer: &Option<Url>, scope: Option<&str>| {
@@ -1146,9 +1158,14 @@ async fn attachment_files(
         } else {
             visited.insert(link.url.clone());
             match http.documents(link.url.clone()).await? {
-                DocumentResponse::Files(result) => {
+                DocumentResponse::Files {
+                    documents: result,
+                    skipped,
+                } => {
                     downloaded.insert(link.url);
                     documents.extend(result);
+                    let room = SKIPPED_NOTE_LIMIT.saturating_sub(skipped_documents.len());
+                    skipped_documents.extend(skipped.into_iter().take(room));
                     continue;
                 }
                 DocumentResponse::Html(page) => {
