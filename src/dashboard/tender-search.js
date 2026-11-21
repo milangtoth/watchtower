@@ -7,6 +7,70 @@ function fold(value) {
   return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 }
 
+// Many portals publish no CPV codes, and titles are in the portal's language. These stems,
+// matched inside folded titles and descriptions, let a sector filter or a sector word in the
+// query find such tenders. Keys are CPV prefixes; the longest known prefix wins.
+const SECTOR_TERMS = {
+  "72": ["software", "informatik", "informationstechn", "edv", "it-", "ikt", "ict", "digital", "daten", "server", "netzwerk", "website", "webseite", "internet", "online", "portal", "plattform", "cloud", "hosting", "lizenz", "rechenzentrum", "programmier", "anwendung", "e-government", "informacni", "pocitac", "informatique", "logiciel", "numerique", "computer", "hardware", "laptop", "tablet", "monitor", "drucker", "map"],
+  "48": ["software", "lizenz", "anwendung", "app ", "logiciel", "licence", "license"],
+  "302": ["computer", "hardware", "laptop", "notebook", "tablet", "monitor", "server", "drucker", "pc ", "pocitac", "ordinateur"],
+  "85": ["gesundheit", "klinik", "krankenhaus", "medizin", "arzt", "aerzt", "patient", "pflegeheim", "krankenpflege", "altenpflege", "pflegedienst", "rettungsdienst", "labor", "impf", "therap", "hospital ", "health", "medical", "nemocnic", "zdravot", "lekar", "sante", "medical", "zorg", "ziekenhuis"],
+  "33": ["medizin", "medical", "roentgen", "rontgen", "implant", "steril", "desinfek", "labor", "diagnost", "zdravotnick", "medic"],
+  "45": ["bau", "sanierung", "neubau", "umbau", "rohbau", "tiefbau", "hochbau", "strasse", "straße", "bruecke", "brucke", "fenster", "dach", "fassade", "heizung", "sanitaer", "sanitar", "elektroinstall", "abbruch", "trockenbau", "maler", "estrich", "stavb", "rekonstrukc", "oprava", "travaux", "construction", "renovat", "bouw"],
+  "71": ["planung", "architekt", "ingenieur", "objektplanung", "tragwerk", "gutachten", "vermessung", "projektovan", "architect", "engineering"],
+  "90": ["reinigung", "abfall", "entsorgung", "winterdienst", "muell", "mull", "uklid", "odpad", "nettoyage", "cleaning", "waste", "schoonmaak"],
+  "79": ["beratung", "consulting", "uebersetz", "ubersetz", "druck", "personal", "veranstaltung", "marketing", "studie", "evaluation", "kommunikation", "poradenstv", "conseil"],
+  "80": ["schul", "bildung", "schulung", "weiterbildung", "kurs", "training", "seminar", "skoleni", "vzdelav", "formation", "education"],
+  "60": ["transport", "befoerderung", "beforderung", "fahrdienst", "schuelerbefoerderung", "doprava", "transport"],
+  "34": ["fahrzeug", "kfz", "pkw", "lkw", "omnibus", "linienbus", "vozidl", "vehicule", "vehicle"],
+  "09": ["strom", "erdgas", "energie", "waerme", "warme", "fernwaerme", "kraftstoff", "elektrin", "energy", "energie"],
+  "15": ["lebensmittel", "verpflegung", "catering", "mittagessen", "speise", "potravin", "stravovan", "food"],
+  "39": ["moebel", "mobel", "mobiliar", "ausstattung", "nabytek", "mobilier", "furniture"],
+  "50": ["wartung", "instandhaltung", "instandsetzung", "reparatur", "servis", "udrzb", "maintenance", "repair"],
+  "77": ["gruenpflege", "grunpflege", "garten", "baum", "landschaft", "spielplatz", "zelen", "espaces verts"],
+  "66": ["versicherung", "bank", "finanz", "kredit", "pojisten", "assurance", "insurance"],
+  "64": ["telekommunikation", "mobilfunk", "telefon", "postdienst", "telecom"],
+  "35": ["sicherheit", "bewachung", "wachschutz", "feuerwehr", "polizei", "security"],
+  "79710": ["bewachung", "wachschutz", "sicherheitsdienst", "security"],
+};
+
+// Sector words a person or the voice agent may type as a query, mapped to CPV prefixes.
+const SECTOR_ALIASES = {
+  it: ["72", "48", "302"], ict: ["72", "48", "302"], ikt: ["72", "48", "302"], software: ["72", "48"],
+  digital: ["72", "48"], computer: ["302", "72"], hardware: ["302"], edv: ["72", "302"],
+  health: ["85", "33"], healthcare: ["85", "33"], medical: ["85", "33"], medicine: ["85", "33"],
+  gesundheit: ["85", "33"], hospital: ["85", "33"], care: ["85"],
+  construction: ["45", "71"], building: ["45"], bau: ["45"], works: ["45"], infrastructure: ["45"],
+  engineering: ["71"], architecture: ["71"], planning: ["71"],
+  cleaning: ["90"], waste: ["90"], environment: ["90", "77"],
+  consulting: ["79"], services: ["79"], education: ["80"], training: ["80"], schools: ["80"],
+  transport: ["60", "34"], vehicles: ["34"], energy: ["09"], food: ["15"], catering: ["15"],
+  furniture: ["39"], maintenance: ["50"], repair: ["50"], landscaping: ["77"], green: ["77"],
+  insurance: ["66"], finance: ["66"], telecom: ["64"], security: ["79710", "35"],
+};
+
+function sectorTerms(prefixes) {
+  const terms = new Set();
+  for (const prefix of prefixes) {
+    for (let length = prefix.length; length >= 2; length--) {
+      const known = SECTOR_TERMS[prefix.slice(0, length)];
+      if (known) {
+        known.forEach(term => terms.add(term));
+        break;
+      }
+    }
+  }
+  return [...terms];
+}
+
+function mentionsSector(searchable, prefixes) {
+  return sectorTerms(prefixes).some(term => searchable.includes(term));
+}
+
+function tenderText(tender) {
+  return fold([tender.title, tender.description, tender.buyerName, tender.referenceNumber].join(" ")) + " ";
+}
+
 function isDate(value) {
   if (!DATE_PATTERN.test(value)) return false;
   const date = new Date(value);
@@ -49,17 +113,34 @@ async function readList(path, signal) {
   return list;
 }
 
-function matches(tender, filters, words) {
+function inSector(tender, prefixes, searchable) {
+  if (tender.cpvCodes?.length) return tender.cpvCodes.some(code => prefixes.some(prefix => code.startsWith(prefix)));
+  // Titles only: descriptions repeat portal boilerplate such as "Vergabeportal" or "online".
+  return mentionsSector(fold(tender.title ?? "") + " ", prefixes);
+}
+
+function wordMatches(tender, word, searchable) {
+  const sector = SECTOR_ALIASES[word];
+  // A sector word matches by meaning or as a whole word, so "it" does not match "arbeiten".
+  if (sector) return inSector(tender, sector, searchable) || searchable.split(/[^\p{L}\p{N}]+/u).includes(word);
+  return searchable.includes(word);
+}
+
+/** mode "all" needs every query word; "any" needs one, as a fallback when "all" finds nothing. */
+function matches(tender, filters, words, mode = "all") {
   if (tender.status !== "open") return false;
   if (filters.country && tender.placeOfPerformance?.countryCode !== filters.country) return false;
-  if (filters.cpv.length && !tender.cpvCodes?.some(code => filters.cpv.some(prefix => code.startsWith(prefix)))) return false;
+  const searchable = tenderText(tender);
+  if (filters.cpv.length && !inSector(tender, filters.cpv, searchable)) return false;
 
   const date = tender.submissionDeadline?.slice(0, 10);
   if (filters.deadlineFrom && (!date || date < filters.deadlineFrom)) return false;
   if (filters.deadlineTo && (!date || date > filters.deadlineTo)) return false;
 
-  const searchable = fold([tender.title, tender.description, tender.buyerName, tender.referenceNumber].join(" "));
-  return words.every(word => searchable.includes(word));
+  if (!words.length) return true;
+  return mode === "any"
+    ? words.some(word => wordMatches(tender, word, searchable))
+    : words.every(word => wordMatches(tender, word, searchable));
 }
 
 function deadline(tender) {
@@ -113,6 +194,7 @@ export async function searchOpenTenders(input, signal) {
   const portalsWithoutData = connected.filter(portal => !portal.lastSuccessAt).map(portal => portalSummary(portal, false));
   const countries = new Set();
   const results = [];
+  const all = [];
   let unavailablePortals = 0;
   // Open tenders a CPV filter cannot judge, because their portal publishes no CPV codes for them.
   let withoutCpv = 0;
@@ -136,6 +218,7 @@ export async function searchOpenTenders(input, signal) {
       for (const tender of tenders) {
         const country = tender.placeOfPerformance?.countryCode;
         if (country) countries.add(country);
+        all.push({ ...tender, portal });
         if (matches(tender, filters, words)) results.push({ ...tender, portal });
         else if (filters.cpv.length && !tender.cpvCodes?.length
           && matches(tender, { ...filters, cpv: [] }, words)) {
@@ -151,9 +234,24 @@ export async function searchOpenTenders(input, signal) {
     throw new Error("Tender data is unavailable from every connected portal.");
   }
 
-  results.sort((a, b) => deadline(a) - deadline(b) || (a.title ?? "").localeCompare(b.title ?? ""));
+  // Nothing matched every word: fall back to tenders that match any of them, best first.
+  let relaxed = false;
+  if (!results.length && words.length > 1) {
+    const scored = all
+      .filter(tender => matches(tender, filters, words, "any"))
+      .map(tender => {
+        const searchable = tenderText(tender);
+        return { tender, score: words.filter(word => wordMatches(tender, word, searchable)).length };
+      });
+    scored.sort((a, b) => b.score - a.score || deadline(a.tender) - deadline(b.tender));
+    results.push(...scored.map(entry => entry.tender));
+    relaxed = results.length > 0;
+  } else {
+    results.sort((a, b) => deadline(a) - deadline(b) || (a.title ?? "").localeCompare(b.title ?? ""));
+  }
   return {
     filters,
+    relaxed,
     results: results.slice(0, RESULT_LIMIT),
     total: results.length,
     countries: [...countries].sort(),
