@@ -218,7 +218,12 @@ Allowed recipe fields:
   set. Detail pages default to html.
 - next, total, empty: optional selections from the page root. next must yield the next URL.
   Use a real result total when shown and an explicit empty-result message when available.
+- page_parameter: optional name of the query parameter holding the page number, for HTML or JSON
+  listings that page by number without a next link (for example page=0 in a JSON API). Put the
+  first page's number in start_url; reading stops at an empty page or when total is reached.
+  Use it instead of next, never both.
 - detail_link: optional selection from each row yielding its detail URL; detail_format defaults to listing.
+  When a JSON listing links to HTML pages, set detail_format "html", or point detail_link at JSON data.
 - list_fields and detail_fields: objects mapping desired fields to selections on the row or detail root.
   Field names: id, url, title, buyerName, publicationDate, submissionDeadline, status, referenceNumber,
   description, procedureType, contractNature, cpvCodes, postalCode, city, countryCode.

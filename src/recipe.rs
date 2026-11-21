@@ -34,6 +34,12 @@ pub enum Preset {
     Ocds,
 }
 
+/// Listing pages read at most in one read.
+const LISTING_PAGE_LIMIT: usize = 250;
+
+/// Seconds to wait after an OCDS API answers a later page with something other than JSON.
+const OCDS_THROTTLE_WAIT: u64 = 300;
+
 /// More URLs than this in a sitemap would take too long to read at one request per second.
 const SITEMAP_PAGE_LIMIT: usize = 500;
 
@@ -74,6 +80,11 @@ pub struct Recipe {
     /// of characters. A pattern without `*` matches URLs that contain it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_pattern: Option<String>,
+    /// HTML and JSON only: the query parameter holding the page number, for listings that page
+    /// by number instead of linking to the next page. The start URL must include it. Reading
+    /// stops at an empty page or once the listing total is reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_parameter: Option<String>,
 }
 
 /// Reads `items` as a plain path. Models sometimes write it like the other selections, as
@@ -189,6 +200,20 @@ impl Recipe {
             ensure!(
                 self.url_pattern.is_none(),
                 "url_pattern applies to feed and sitemap listings"
+            );
+        }
+        if let Some(parameter) = &self.page_parameter {
+            ensure!(
+                !parameter.trim().is_empty(),
+                "page_parameter names a query parameter"
+            );
+            ensure!(
+                matches!(self.listing, Format::Html | Format::Json),
+                "page_parameter applies to html and json listings"
+            );
+            ensure!(
+                self.next.is_none(),
+                "use either next or page_parameter for pagination, not both"
             );
         }
         if matches!(self.listing, Format::Html) {
@@ -402,7 +427,9 @@ struct Attachments {
 
 struct ListingPage {
     rows: Vec<ListingRow>,
-    next: Option<Url>,
+    /// Every next-page link the page offers, in document order. A selector can match
+    /// "first", "previous" and "next" links alike; the reader follows the first page not yet read.
+    next: Vec<Url>,
     total: Option<usize>,
     /// The page shows the recipe's empty state or a total of 0.
     empty_state: bool,
@@ -444,17 +471,35 @@ pub async fn read(
     let mut empty_state = false;
     while let Some(mut url) = queue.pop_front() {
         url.set_fragment(None);
-        if seen_pages.len() >= 250 || !seen_pages.insert(url.clone()) {
-            return Err(ReadFailure::Incomplete(
-                "Pagination loop or page limit reached".into(),
-            ));
+        if !seen_pages.insert(url.clone()) {
+            continue;
+        }
+        if seen_pages.len() > LISTING_PAGE_LIMIT {
+            return Err(ReadFailure::Incomplete(format!(
+                "The listing has more than {LISTING_PAGE_LIMIT} pages; use a listing limited to open tenders"
+            )));
         }
         listing_pages.push(url.to_string());
         fetched.insert(url.to_string());
-        let page = http.page(url).await?;
+        let page = http.page(url.clone()).await?;
         fetched.insert(without_fragment(&page.url));
         if samples.len() < 3 {
             samples.push(sample_page(&page, 16_000).body);
+        }
+        // An OCDS API that answers a later page with something other than JSON is usually
+        // limiting requests; the recipe that read the earlier pages is not broken.
+        if recipe.preset == Some(Preset::Ocds)
+            && listing_pages.len() > 1
+            && serde_json::from_str::<serde::de::IgnoredAny>(&page.body).is_err()
+        {
+            return Err(ReadFailure::Throttled {
+                reason: format!(
+                    "OCDS page {} at {} was not JSON; the publisher is probably limiting requests",
+                    listing_pages.len(),
+                    location(&page.url)
+                ),
+                retry_after: std::time::Duration::from_secs(OCDS_THROTTLE_WAIT),
+            });
         }
         let listing = parse_listing(&page, recipe).map_err(incomplete)?;
         if let Some(count) = listing.total {
@@ -468,8 +513,24 @@ pub async fn read(
         empty_state |= listing.empty_state;
         listing_links.extend(listing.links.all);
         pagination_links.extend(listing.links.pagination);
+        let page_rows = listing.rows.len();
         listing_rows.extend(listing.rows);
-        queue.extend(listing.next);
+        let next = match &recipe.page_parameter {
+            Some(parameter) => {
+                let finished =
+                    page_rows == 0 || total.is_some_and(|count| listing_rows.len() >= count);
+                if finished {
+                    None
+                } else {
+                    Some(next_page_number(&url, parameter).map_err(incomplete)?)
+                }
+            }
+            None => listing.next.into_iter().find_map(|mut next| {
+                next.set_fragment(None);
+                (!fetched.contains(next.as_str())).then_some(next)
+            }),
+        };
+        queue.extend(next);
         queue.extend(listing.more);
     }
     if recipe.listing == Format::Sitemap {
@@ -575,9 +636,10 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         Format::Sitemap => return sitemap_listing(page, recipe),
         Format::Html | Format::Json => {}
     }
-    let source = Source::parse(recipe.listing, &page.body)?;
+    let source = Source::parse(recipe.listing, &page.body)
+        .map_err(|error| wrong_format(error, recipe.listing, page, "Listing"))?;
     let root = source.root();
-    let next = resolve_one(&root, recipe.next.as_ref(), &page.url)?;
+    let next = resolve_many(&root, recipe.next.as_ref(), &page.url)?;
     let total = match recipe.total.as_ref().and_then(|rule| root.first(rule)) {
         Some(text) => Some(parse_total(&text).ok_or_else(|| {
             anyhow::anyhow!(
@@ -593,9 +655,11 @@ fn parse_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         .is_some_and(|rule| root.first(rule).is_some());
     let items = source.items(&recipe.items)?;
     if items.is_empty() {
-        let json_empty = matches!(recipe.listing, Format::Json) && next.is_none();
+        let json_empty = matches!(recipe.listing, Format::Json) && next.is_empty();
+        // A numbered page past the end is often just empty.
+        let past_end = recipe.page_parameter.is_some();
         ensure!(
-            empty || json_empty || total == Some(0),
+            empty || json_empty || past_end || total == Some(0),
             "Listing yielded no rows and has no recognized empty state"
         );
     }
@@ -660,7 +724,7 @@ fn feed_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
     }
     Ok(ListingPage {
         rows,
-        next,
+        next: next.into_iter().collect(),
         total: None,
         empty_state,
         links: ListingLinks::default(),
@@ -689,7 +753,7 @@ fn sitemap_listing(page: &Page, recipe: &Recipe) -> Result<ListingPage> {
         .collect::<Result<_>>()?;
     Ok(ListingPage {
         rows,
-        next: None,
+        next: Vec::new(),
         total: None,
         empty_state: false,
         links: ListingLinks::default(),
@@ -728,12 +792,55 @@ fn ocds_listing(page: &Page) -> Result<ListingPage> {
         .collect();
     Ok(ListingPage {
         rows,
-        next,
+        next: next.into_iter().collect(),
         total: None,
         empty_state: false,
         links: ListingLinks::default(),
         more: Vec::new(),
     })
+}
+
+/// The same URL with its page-number query parameter increased by one.
+fn next_page_number(url: &Url, parameter: &str) -> Result<Url> {
+    let mut found = false;
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| {
+            if key == parameter && !found {
+                found = true;
+                let number: u64 = value.parse().map_err(|_| {
+                    anyhow::anyhow!("page_parameter {parameter} is not a number: {value:?}")
+                })?;
+                Ok((key.into_owned(), (number + 1).to_string()))
+            } else {
+                Ok((key.into_owned(), value.into_owned()))
+            }
+        })
+        .collect::<Result<_>>()?;
+    ensure!(
+        found,
+        "page_parameter {parameter} is missing from the listing URL; include it in start_url"
+    );
+    let mut next = url.clone();
+    next.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(next)
+}
+
+/// Explains a page that is not in the format the recipe expects, which a repair can act on.
+fn wrong_format(error: anyhow::Error, format: Format, page: &Page, what: &str) -> anyhow::Error {
+    if format == Format::Json && page.body.trim_start().starts_with('<') {
+        let hint = if what == "Detail" {
+            "set detail_format to \"html\" or point detail_link at the JSON data"
+        } else {
+            "use listing \"html\" or point start_url at the JSON endpoint"
+        };
+        anyhow::anyhow!(
+            "{what} page {} is HTML, not JSON; {hint}",
+            location(&page.url)
+        )
+    } else {
+        error.context(format!("{what} page {}", location(&page.url)))
+    }
 }
 
 /// Matches `text` against a pattern where `*` stands for any run of characters. A pattern
@@ -867,7 +974,8 @@ fn pagination_link(anchor: ElementRef<'_>) -> bool {
 /// the HTML fallback reads that page's main content instead.
 fn parse_detail(page: &Page, recipe: &Recipe) -> Result<(Fields, Attachments)> {
     let format = recipe.page_format();
-    let source = Source::parse(format, &page.body)?;
+    let source = Source::parse(format, &page.body)
+        .map_err(|error| wrong_format(error, format, page, "Detail"))?;
     let root = source.root();
     let mut fields = extract(&root, &recipe.detail_fields);
     resolve_field_url(&mut fields, &page.url);
