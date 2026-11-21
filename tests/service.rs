@@ -249,18 +249,12 @@ async fn portal_lifecycle_preserves_verified_data_and_serves_document_bytes() {
     assert_eq!(first[0]["publicationDate"], Value::Null);
     assert!(first[0].get("referenceNumber").is_none());
     let files = first[0]["documents"].as_array().unwrap();
-    assert_eq!(files.len(), 3);
-    let checklist = files
-        .iter()
-        .find(|file| file["fileName"] == "checklist.pdf")
-        .unwrap();
-    assert_eq!(
-        checklist["sha256"],
-        format!("{:x}", Sha256::digest(CHECKLIST))
-    );
-    assert_eq!(
-        call(&app, "GET", checklist["path"].as_str().unwrap(), None).await,
-        (StatusCode::OK, CHECKLIST.to_vec()),
+    // The "Supervisor Forms" bridge links onward to another page; its checklist belongs there,
+    // not to this tender.
+    assert_eq!(files.len(), 2);
+    assert!(
+        files.iter().all(|file| file["fileName"] != "checklist.pdf"),
+        "{files:?}"
     );
     let guide = files
         .iter()
@@ -506,12 +500,11 @@ async fn fallback_pages_skip_external_tools_but_recipe_dead_ends_still_fail() {
         .iter()
         .map(|document| (document.file_name.as_str(), document.sha256.clone()))
         .collect();
+    // "Supervisor forms" links onward to another publication's attachment list. Its files,
+    // such as terms.pdf, belong to that publication, not to this tender.
     assert_eq!(
         names,
-        [
-            ("spec.pdf", format!("{:x}", Sha256::digest(DOCUMENT))),
-            ("terms.pdf", format!("{:x}", Sha256::digest(TERMS))),
-        ]
+        [("spec.pdf", format!("{:x}", Sha256::digest(DOCUMENT)))]
     );
     assert_eq!(tool_hits.load(Ordering::SeqCst), 0);
 
