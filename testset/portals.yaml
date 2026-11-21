@@ -7,4 +7,80 @@
 #   software: ...
 #   kind: server-rendered | js-app | multi-step
 #   expect: serving | failed
-portals: []
+#
+# Seeded from the nine publishers Tender Atlas collects from (its feeds.py
+# SOURCES registry). `api` is the open-data endpoint Atlas reads; Watchtower
+# must still learn the public portal from `url` alone. `kind` and `expect`
+# are first guesses and need checking against a real Watchtower run.
+portals:
+  - url: https://ted.europa.eu/en/
+    name: TED (Tenders Electronic Daily)
+    country: EU
+    software: TED
+    kind: js-app
+    expect: serving
+    api: https://api.ted.europa.eu/v3/notices/search
+
+  - url: https://oeffentlichevergabe.de/
+    name: Bekanntmachungsservice (DÖE)
+    country: DE
+    software: Bekanntmachungsservice
+    kind: js-app
+    expect: serving
+    api: https://oeffentlichevergabe.de/api/notice-exports
+
+  - url: https://www.boamp.fr/
+    name: BOAMP
+    country: FR
+    software: BOAMP (Opendatasoft API)
+    kind: server-rendered
+    expect: serving
+    api: https://www.boamp.fr/api/explore/v2.1/catalog/datasets/boamp/records
+
+  - url: https://contrataciondelsectorpublico.gob.es/
+    name: Plataforma de Contratación del Sector Público (PLACSP)
+    country: ES
+    software: PLACSP
+    kind: multi-step
+    expect: serving
+    api: https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3
+
+  - url: https://ezamowienia.gov.pl/
+    name: Biuletyn Zamówień Publicznych (e-Zamówienia)
+    country: PL
+    software: e-Zamówienia
+    kind: js-app
+    expect: serving
+    api: https://ezamowienia.gov.pl/mo-board/api/v1/notice
+
+  - url: https://www.tenderned.nl/
+    name: TenderNed
+    country: NL
+    software: TenderNed
+    kind: js-app
+    expect: serving
+    api: https://www.tenderned.nl/cms/nl/aanbesteden-in-cijfers/datasets-aanbestedingen
+
+  - url: https://www.etenders.gov.ie/
+    name: eTenders
+    country: IE
+    software: eTenders
+    kind: multi-step
+    expect: serving
+    api: https://data.gov.ie/dataset/contract-notices-published-on-etenders
+
+  - url: https://www.find-tender.service.gov.uk/
+    name: Find a Tender
+    country: UK
+    software: Find a Tender
+    kind: server-rendered
+    expect: serving
+    api: https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages
+
+  - url: https://www.contractsfinder.service.gov.uk/
+    name: Contracts Finder
+    country: UK
+    software: Contracts Finder
+    kind: server-rendered
+    expect: serving
+    api: https://www.contractsfinder.service.gov.uk/harvester/Notices/Data/CSV/
