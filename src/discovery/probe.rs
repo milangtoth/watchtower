@@ -232,7 +232,13 @@ impl<S: Source> Probe<'_, S> {
         // Only sample JavaScript when the start page is an application shell.
         let mut post_search = false;
         if let Some(shell) = &shell {
-            post_search = self.bundle_listings(shell, &sampled).await?;
+            match self.bundle_listings(shell, &sampled).await {
+                Ok(post) => post_search = post,
+                Err(err) if !self.candidates.iter().any(ConnectionCandidate::is_usable) => {
+                    return Err(err);
+                }
+                Err(_) => {} // Stop sampling and keep the usable route already found.
+            }
         }
 
         // 4. TED.
@@ -290,6 +296,7 @@ impl<S: Source> Probe<'_, S> {
             {
                 Ok(bundle) => routes.inspect(&bundle.body, &shell.base, &shell.page),
                 Err(err @ ReadFailure::Throttled { .. }) => return Err(err),
+                Err(err) if http_status(&err) == Some(429) => return Err(err),
                 Err(_) => continue,
             }
         }
@@ -310,6 +317,7 @@ impl<S: Source> Probe<'_, S> {
             {
                 Ok(sample) => sample,
                 Err(err @ ReadFailure::Throttled { .. }) => return Err(err),
+                Err(err) if http_status(&err) == Some(429) => return Err(err),
                 Err(err) => {
                     post_search |= http_status(&err) == Some(405);
                     continue;
@@ -1093,7 +1101,7 @@ fn inspect_html(base: &Url, body: &str) -> HtmlPage {
             page.refresh = Some(url);
         }
     }
-    if page.notice_links == 0 && page.fields.is_empty() {
+    if page.notice_links == 0 {
         page.shell = bundles::scripts(&document, base);
     }
     page.govuk = document.select(&selector("meta[name]")).any(|meta| {
@@ -1546,6 +1554,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_rejects_error_and_metadata_objects_and_caps_endpoint_samples() {
+        let start = "https://portal.example/";
+        let source = Canned::default()
+            .page(
+                start,
+                "text/html",
+                r#"<div id="app"></div><script src="/main.js"></script>"#,
+            )
+            .page(
+                "https://portal.example/main.js",
+                "application/javascript",
+                r#"
+                fetch('/api/notices/a'); fetch('/api/notices/b');
+                fetch('/api/notices/c'); fetch('/api/notices/d');
+            "#,
+            )
+            .page(
+                "https://portal.example/api/notices/a",
+                "application/json",
+                r#"{"data":null,"errors":[{"id":"E"}]}"#,
+            )
+            .page(
+                "https://portal.example/api/notices/b",
+                "application/json",
+                r#"{"id":"config","title":"Portal"}"#,
+            )
+            .failure(
+                "https://portal.example/api/notices/c",
+                ReadFailure::Incomplete("Portal returned HTTP 405".into()),
+            );
+        let error = probe_with(&url(start), &source).await.unwrap_err();
+        let requests = source.requested();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|u| u.contains("/api/notices/"))
+                .count(),
+            3
+        );
+        assert!(!requests.iter().any(|u| u.ends_with("/d")));
+        assert!(requests.len() <= REQUEST_BUDGET);
+        assert!(
+            error.to_string().contains("POST search is unsupported"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn app_shell_reads_the_home_page_for_feeds() {
         let start = "https://portal.example/aankondigingen/overzicht";
         let shell = r#"<!doctype html><html><head><base href="/aankondigingen/"></head>
@@ -1909,6 +1965,8 @@ mod tests {
             let files = tempfile::tempdir().unwrap();
             let http = Fetcher::new(files.path().into())
                 .unwrap()
+                .with_cache(files.path().join("scope-cache"))
+                .unwrap()
                 .portal(&url(&base));
             assert_eq!(
                 http.scoped_sample(url(&format!("{base}/bundle")), 4, true)
@@ -1936,6 +1994,22 @@ mod tests {
                     .is_err()
             );
             assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+            // A truncated sample must not replace a complete response in the development cache.
+            assert_eq!(
+                http.page(url(&format!("{base}/bundle")))
+                    .await
+                    .unwrap()
+                    .body,
+                "0123456789"
+            );
+            // A redirect chain cached by an ordinary read still has to obey bundle scope.
+            http.page(url(&format!("{base}/redirect"))).await.unwrap();
+            assert!(
+                http.scoped_sample(url(&format!("{base}/redirect")), 64, true)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
 
         #[tokio::test]
