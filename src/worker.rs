@@ -209,7 +209,14 @@ impl Worker {
             failure
         });
         match result {
-            Ok(candidate) => self.publish(job, &job.id, &recipe, candidate).await,
+            Ok(candidate) => {
+                let note = if previous.is_none() {
+                    "Attached and verified"
+                } else {
+                    "Read verified"
+                };
+                self.publish(job, &job.id, &recipe, candidate, note).await
+            }
             Err(failure) if failure.is_temporary() => self.defer(job, &job.id, &failure).await,
             Err(failure @ ReadFailure::Blocked(_)) => {
                 self.store
@@ -366,7 +373,12 @@ impl Worker {
         snapshot: &Snapshot<'_>,
     ) -> Result<()> {
         let job = ctx.job;
-        let Some(run_id) = self.store.begin_repair(job, &failure.to_string()).await? else {
+        let broke = describe_break(&failure, snapshot);
+        let Some(run_id) = self
+            .store
+            .begin_repair(job, &failure.to_string(), &broke)
+            .await?
+        else {
             return Ok(());
         };
         // Portals attached before connection decisions existed get one now.
@@ -388,7 +400,17 @@ impl Worker {
         let mut tried = vec![decision.chosen.method];
         loop {
             let error = self
-                .repair_method(ctx, &run_id, &mut recipe, &mut failure, snapshot, &decision)
+                .repair_method(
+                    ctx,
+                    &RepairRun {
+                        id: &run_id,
+                        broke: &broke,
+                    },
+                    &mut recipe,
+                    &mut failure,
+                    snapshot,
+                    &decision,
+                )
                 .await?;
             match error {
                 RepairOutcome::Published => return Ok(()),
@@ -461,7 +483,7 @@ impl Worker {
     async fn repair_method(
         &self,
         ctx: &ReasoningContext<'_>,
-        run_id: &str,
+        run: &RepairRun<'_>,
         recipe: &mut Recipe,
         failure: &mut ReadFailure,
         snapshot: &Snapshot<'_>,
@@ -489,11 +511,12 @@ impl Worker {
             };
             let error = match attempt {
                 Ok(candidate) => {
-                    self.publish(job, run_id, recipe, candidate).await?;
+                    let note = repair_note(job.recipe.as_deref(), recipe, decision, run.broke);
+                    self.publish(job, run.id, recipe, candidate, &note).await?;
                     return Ok(RepairOutcome::Published);
                 }
                 Err((stage, error)) => {
-                    log_failed_recipe(&job.portal_id, run_id, recipe, stage, &error);
+                    log_failed_recipe(&job.portal_id, run.id, recipe, stage, &error);
                     error
                 }
             };
@@ -511,6 +534,7 @@ impl Worker {
         run_id: &str,
         recipe: &Recipe,
         candidate: CandidateRead,
+        note: &str,
     ) -> Result<()> {
         self.store
             .publish(
@@ -519,9 +543,103 @@ impl Worker {
                 &serde_json::to_string(recipe)?,
                 candidate,
                 self.interval,
+                note,
             )
             .await
     }
+}
+
+/// A repair run in progress and the run reason of the read that started it.
+struct RepairRun<'a> {
+    id: &'a str,
+    broke: &'a str,
+}
+
+/// The run reason of a read that broke: the failure and what was being served before it.
+fn describe_break(failure: &ReadFailure, snapshot: &Snapshot<'_>) -> String {
+    let held = snapshot.tenders.len();
+    if held == 0 {
+        return format!("{failure}. No verified read to fall back on yet");
+    }
+    let open = snapshot
+        .tenders
+        .iter()
+        .filter(|published| published.tender.status == TenderStatus::Open)
+        .count();
+    format!(
+        "{failure}. The last verified read held {held} tender(s), {open} open, and stays served"
+    )
+}
+
+/// Recipe settings named in a repair reason before the rest are only counted.
+const NOTE_CHANGES: usize = 4;
+
+/// The run reason of a repair that published: the method, what changed in the recipe, and the
+/// failure it repaired.
+fn repair_note(
+    previous: Option<&str>,
+    recipe: &Recipe,
+    decision: &ConnectionDecision,
+    broke: &str,
+) -> String {
+    let method = decision.chosen.method.label();
+    let previous = previous.and_then(|data| serde_json::from_str::<Value>(data).ok());
+    let changes = match previous {
+        None => "learned a new recipe".to_owned(),
+        Some(previous) => {
+            let mut changes = Vec::new();
+            recipe_changes(
+                "",
+                &previous,
+                &serde_json::to_value(recipe).unwrap_or_default(),
+                &mut changes,
+            );
+            match changes.len() {
+                0 => "kept the recipe, which verified on a fresh read".to_owned(),
+                count if count <= NOTE_CHANGES => format!("changed {}", changes.join("; ")),
+                count => format!(
+                    "changed {}; and {} more setting(s)",
+                    changes[..NOTE_CHANGES].join("; "),
+                    count - NOTE_CHANGES
+                ),
+            }
+        }
+    };
+    format!(
+        "Repaired via {method}: {changes}. Fixes: {}",
+        recipe::sample(broke, 300)
+    )
+}
+
+/// Collects `path: before → after` for every recipe setting that differs, recursing into
+/// objects so a changed selector names its field.
+fn recipe_changes(path: &str, before: &Value, after: &Value, changes: &mut Vec<String>) {
+    if before == after {
+        return;
+    }
+    if let (Value::Object(before), Value::Object(after)) = (before, after) {
+        let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+        for key in keys {
+            let path = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            recipe_changes(
+                &path,
+                before.get(key).unwrap_or(&Value::Null),
+                after.get(key).unwrap_or(&Value::Null),
+                changes,
+            );
+        }
+        return;
+    }
+    let show = |value: &Value| match value {
+        Value::Null => "unset".to_owned(),
+        Value::String(text) => format!("\"{}\"", recipe::sample(text, 60)),
+        other => recipe::sample(&other.to_string(), 60),
+    };
+    changes.push(format!("{path} {} → {}", show(before), show(after)));
 }
 
 /// Connection methods a repair tries before the portal is failed.

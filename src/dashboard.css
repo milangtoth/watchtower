@@ -261,6 +261,12 @@ h1 span {
 .record-list li + li { border-top: 1px solid var(--line); }
 .record-name { flex: 1 1 9rem; color: var(--text); }
 .record-time, .record-status { font-size: 11px; color: var(--muted); }
+.run-history li { display: grid; gap: 8px; }
+.run-step { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 12px; }
+.run-reason { flex-basis: 100%; margin: 0; font-size: 12px; line-height: 17px; color: var(--secondary); }
+.run-pair { margin-inline: -12px; padding-inline: 9px 12px; border-left: 3px solid var(--healing); }
+.run-pair .run-step[data-result="failed"] .record-name { color: var(--failed); }
+.run-pair .run-step + .run-step { padding-top: 8px; border-top: 1px dashed var(--line); }
 .file-link { width: 100%; }
 .file-link, .detail-api { color: var(--accent); }
 .detail-api { justify-self: start; margin-top: 4px; }
