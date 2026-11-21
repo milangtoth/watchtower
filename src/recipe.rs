@@ -2761,7 +2761,10 @@ mod reader_fix_tests {
     #[test]
     fn rows_that_keep_fields_or_mostly_lose_links_still_fail_the_listing() {
         let url = Url::parse("https://vergabe.example/Satellite/company/welcome.do").unwrap();
-        let fixture = include_str!("../tests/fixtures/satellite/listing.html");
+        // Git may check the fixture out with CRLF line endings on Windows.
+        let fixture =
+            include_str!("../tests/fixtures/satellite/listing.html").replace("\r\n", "\n");
+        let fixture = fixture.as_str();
         let parse = |body: String| {
             parse_listing(
                 &Page {
