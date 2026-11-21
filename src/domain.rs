@@ -316,7 +316,18 @@ pub enum ReadFailure {
     },
 }
 
+/// The reason the fetcher gives when a page answers 401, redirects to a login page or shows a
+/// login form.
+pub const LOGIN_REQUIRED: &str = "Portal requires a login";
+
 impl ReadFailure {
+    /// Whether this page sits behind a login. On a page the portal's listing does not depend on,
+    /// such as a detail page or a route the model guessed, that rules out the route, not the
+    /// portal.
+    pub fn is_login_wall(&self) -> bool {
+        matches!(self, Self::Blocked(reason) if reason == LOGIN_REQUIRED)
+    }
+
     /// Whether retrying later may succeed without any change to the recipe.
     pub fn is_temporary(&self) -> bool {
         matches!(self, Self::Temporary(_) | Self::Throttled { .. })
